@@ -42,6 +42,14 @@ namespace Nancy
         public Action<Stream> Contents { get; set; }
 
         /// <summary>
+        /// Gets whether we can automatically dispose the HttpListenerResponse's stream. If DisposeStream is false
+        /// the Response instance is responsible of disposing the stream.
+        /// </summary>
+        /// <value>A boolean flag that determines whether to dispose the HttpListenerResponse's stream</value>
+        /// <remarks></remarks>
+        public bool DisposeStream { get; set; }
+
+        /// <summary>
         /// Gets the collection of HTTP response headers that should be sent back to the client.
         /// </summary>
         /// <value>An <see cref="IDictionary{TKey,TValue}"/> instance, contaning the key/value pair of headers.</value>

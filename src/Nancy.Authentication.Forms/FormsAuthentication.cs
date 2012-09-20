@@ -277,6 +277,10 @@ namespace Nancy.Authentication.Forms
         /// <returns>Decrypted value, or empty on error or if failed validation</returns>
         private static string DecryptAndValidateAuthenticationCookie(string cookieValue, FormsAuthenticationConfiguration configuration)
         {
+            if (string.IsNullOrEmpty(cookieValue))
+            {
+                return String.Empty;
+            }
             // TODO - shouldn't this be automatically decoded by nancy cookie when that change is made?
             var decodedCookie = Helpers.HttpUtility.UrlDecode(cookieValue);
 

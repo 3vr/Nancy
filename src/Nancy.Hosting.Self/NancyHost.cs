@@ -176,9 +176,11 @@
             response.ContentType = nancyResponse.ContentType;
             response.StatusCode = (int)nancyResponse.StatusCode;
 
-            using (var output = response.OutputStream)
+            var output = response.OutputStream;
+            nancyResponse.Contents.Invoke(output);
+            if (nancyResponse.DisposeStream)
             {
-                nancyResponse.Contents.Invoke(output);
+                output.Dispose();
             }
         }
 
