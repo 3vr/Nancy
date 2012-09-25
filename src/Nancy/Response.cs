@@ -25,6 +25,7 @@ namespace Nancy
             this.Headers = new Dictionary<string, string>();
             this.StatusCode = HttpStatusCode.OK;
             this.Cookies = new List<INancyCookie>(2);
+            this.DisposeStream = true;
         }
 
         /// <summary>
