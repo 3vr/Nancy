@@ -193,6 +193,11 @@
             }
             response.StatusCode = (int)nancyResponse.StatusCode;
 
+            if (nancyResponse.Headers.ContainsKey("Content-Length"))
+            {
+                response.ContentLength64 = long.Parse(nancyResponse.Headers["Content-Length"]);
+            }
+
             var output = response.OutputStream;
             nancyResponse.Contents.Invoke(output);
             if (nancyResponse.DisposeStream)
