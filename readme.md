@@ -22,12 +22,14 @@ Compile, run and enjoy the simple, elegant design!
 ## Features
 
 * Built from the bottom up, not simply a DSL on top of an existing framework. Removing limitations and feature hacks of an underlying framework, as well as the need to reference more assemblies than you need. _keep it light_
-* Run anywhere. Nancy is not built on any specific hosting technology can can be run anywhere. Out of the box, Nancy supports running on ASP.NET/IIS, WCF, Self-hosting and any [OWIN](http://owin.org)
+* Run anywhere. Nancy is not built on any specific hosting technology can be run anywhere. Out of the box, Nancy supports running on ASP.NET/IIS, WCF, Self-hosting and any [OWIN](http://owin.org)
 * Ultra lightweight action declarations for GET, HEAD, PUT, POST, DELETE, OPTIONS and PATCH requests
-* View engine integration (Razor, Spark, NDjango, dotLiquid and our own SuperSimpleViewEngine)
+* View engine integration (Razor, Spark, dotLiquid, our own SuperSimpleViewEngine and many more)
 * Powerful request path matching that includes advanced parameter capabilities. The path matching strategy can be replaced with custom implementations to fit your exact needs
 * Easy response syntax, enabling you to return things like int, string, HttpStatusCode and Action<Stream> elements without having to explicitly cast or wrap your response - you just return it and Nancy _will_ do the work for you
 * A powerful, light-weight, testing framework to help you verify the behavior of your application
+* Content negotiation
+* And much, much more
 
 ## The super-duper-happy-path
 
@@ -44,8 +46,7 @@ Above all, creating an application with Nancy should be a pleasure, and hopefull
 
 ## Community
 
-You can find lot of Nancy users on the [Nancy User Group](https://groups.google.com/forum/?fromgroups#forum/nancy-web-framework). That is where most of the discussions regarding the development and usage of Nancy is taking place. You can also
-find Nancy on Twitter using the #NancyFx hashtag.	
+You can find lot of Nancy users on the [Nancy User Group](https://groups.google.com/forum/?fromgroups#forum/nancy-web-framework). That is where most of the discussions regarding the development and usage of Nancy is taking place. Nancy followers can be found in the JabbR [#NancyFX room](http://jabbr.net/#/rooms/nancyfx). You can also find Nancy on Twitter using the #NancyFx hashtag.	
 	
 ## Help out
 
@@ -64,7 +65,7 @@ Nancy are:
 
 ## Contributors
 
-Nancy is not a one man project and many of the features that are availble would not have been possible without the awesome contributions from the community!
+Nancy is not a one man project and many of the features that are available would not have been possible without the awesome contributions from the community!
 
 For a full list of contributors, please see [the website](http://www.nancyfx.org/contribs.html).
 
@@ -76,3 +77,4 @@ Copyright © 2010 Andreas Håkansson, Steven Robbins and contributors
 
 Nancy is licensed under [MIT](http://www.opensource.org/licenses/mit-license.php "Read more about the MIT license form"). Refer to license.txt for more information.
 
+[![Build Status](https://travis-ci.org/NancyFx/Nancy.png?branch=master)](https://travis-ci.org/NancyFx/Nancy)

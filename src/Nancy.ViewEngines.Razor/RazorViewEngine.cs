@@ -9,17 +9,19 @@
     using System.Reflection;
     using System.Web.Razor;
     using System.Web.Razor.Parser.SyntaxTree;
-
     using Nancy.Bootstrapper;
     using Nancy.Responses;
+    using Nancy.Localization;
+    using Nancy.ViewEngines.Razor.CSharp;
 
     /// <summary>
     /// View engine for rendering razor views.
     /// </summary>
-    public class RazorViewEngine : IViewEngine
+    public class RazorViewEngine : IViewEngine, IDisposable
     {
         private readonly IRazorConfiguration razorConfiguration;
         private readonly IEnumerable<IRazorViewRenderer> viewRenderers;
+        private readonly object compileLock = new object();
 
         /// <summary>
         /// Gets the extensions file extensions that are supported by the view engine.
@@ -29,15 +31,6 @@
         public IEnumerable<string> Extensions
         {
             get { return this.viewRenderers.Select(x => x.Extension); }
-        }
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="RazorViewEngine"/> class with a default configuration.
-        /// </summary>
-        /// <remarks>Well create an instance of the engine using the <see cref="DefaultRazorConfiguration"/>.</remarks>
-        public RazorViewEngine()
-            : this(new DefaultRazorConfiguration())
-        {
         }
 
         /// <summary>
@@ -103,6 +96,7 @@
                     body = view.Body;
                     sectionContents = view.SectionContents;
                     root = !view.HasLayout;
+                    layout = view.Layout;
                 }
 
                 writer.Write(body);
@@ -132,26 +126,26 @@
             return new RazorTemplateEngine(engineHost);
         }
 
-        private Func<NancyRazorViewBase> GetCompiledViewFactory(string extension, TextReader reader, Assembly referencingAssembly, Type passedModelType)
+        private Func<INancyRazorView> GetCompiledViewFactory(string extension, TextReader reader, Assembly referencingAssembly, Type passedModelType, ViewLocationResult viewLocationResult)
         {
-            var renderer = this.viewRenderers
-                .Where(x => x.Extension.Equals(extension, StringComparison.OrdinalIgnoreCase))
-                .First();
+            var renderer = this.viewRenderers.First(x => x.Extension.Equals(extension, StringComparison.OrdinalIgnoreCase));
 
             var engine = this.GetRazorTemplateEngine(renderer.Host);
 
-            var razorResult = engine.GenerateCode(reader);
+            var razorResult = engine.GenerateCode(reader, null, null, "roo");
 
-            var viewFactory = this.GenerateRazorViewFactory(renderer.Provider, razorResult, referencingAssembly, renderer.Assemblies, passedModelType);
+            var viewFactory = this.GenerateRazorViewFactory(renderer, razorResult, referencingAssembly, passedModelType, viewLocationResult);
 
             return viewFactory;
         }
 
-        private Func<NancyRazorViewBase> GenerateRazorViewFactory(CodeDomProvider codeProvider, GeneratorResults razorResult, Assembly referencingAssembly, IEnumerable<string> rendererSpecificAssemblies, Type passedModelType)
+        private Func<INancyRazorView> GenerateRazorViewFactory(IRazorViewRenderer viewRenderer, GeneratorResults razorResult, Assembly referencingAssembly, Type passedModelType, ViewLocationResult viewLocationResult)
         {
-            var outputAssemblyName = Path.Combine(Path.GetTempPath(), String.Format("Temp_{0}.dll", Guid.NewGuid().ToString("N")));
+            var outputAssemblyName = 
+                Path.Combine(Path.GetTempPath(), String.Format("Temp_{0}.dll", Guid.NewGuid().ToString("N")));
 
-            var modelType = FindModelType(razorResult.Document, passedModelType);
+            var modelType = 
+                FindModelType(razorResult.Document, passedModelType, viewRenderer.ModelCodeGenerator);
 
             var assemblies = new List<string>
             {
@@ -161,13 +155,13 @@
                 GetAssemblyPath(modelType)
             };
 
+            assemblies.AddRange(AppDomainAssemblyTypeScanner.Assemblies.Select(GetAssemblyPath));
+
             if (referencingAssembly != null)
+            {
                 assemblies.Add(GetAssemblyPath(referencingAssembly));
-
-            assemblies = assemblies
-                .Union(rendererSpecificAssemblies)
-                .ToList();
-
+            }
+            
             if (this.razorConfiguration != null)
             {
                 var assemblyNames = this.razorConfiguration.GetAssemblyNames();
@@ -182,19 +176,39 @@
                 }
             }
 
-            var compilerParameters = new CompilerParameters(assemblies.ToArray(), outputAssemblyName);
+            assemblies = assemblies
+                .Union(viewRenderer.Assemblies)
+                .ToList();
 
-            var results = codeProvider.CompileAssemblyFromDom(compilerParameters, razorResult.GeneratedCode);
+            var compilerParameters = 
+                new CompilerParameters(assemblies.ToArray(), outputAssemblyName);
+
+            CompilerResults results;
+            lock (this.compileLock)
+            {
+                results = viewRenderer.Provider.CompileAssemblyFromDom(compilerParameters, razorResult.GeneratedCode);
+            }
 
             if (results.Errors.HasErrors)
             {
-                var err = results.Errors
-                    .OfType<CompilerError>()
-                    .Where(ce => !ce.IsWarning)
-                    .Select(error => String.Format("Error Compiling Template: ({0}, {1}) {2})", error.Line, error.Column, error.ErrorText))
-                    .Aggregate((s1, s2) => s1 + "<br/>" + s2);
+                var output = new string[results.Output.Count];
+                results.Output.CopyTo(output, 0);
+                var outputString = string.Join("\n", output);
 
-                return () => new NancyRazorErrorView(err);
+                var fullTemplateName = viewLocationResult.Location + "/" + viewLocationResult.Name + "." + viewLocationResult.Extension;
+                var templateLines = GetViewBodyLines(viewLocationResult);
+                var errors = results.Errors.OfType<CompilerError>().Where(ce => !ce.IsWarning).ToArray();
+                var errorMessages = BuildErrorMessages(errors);
+
+                MarkErrorLines(errors, templateLines);
+
+                var errorDetails = string.Format(
+                                        "Error compiling template: <strong>{0}</strong><br/><br/>Errors:<br/>{1}<br/><br/>Details:<br/>{2}",
+                                        fullTemplateName,
+                                        errorMessages,
+                                        templateLines.Aggregate((s1, s2) => s1 + "<br/>" + s2));
+
+                return () => new NancyRazorErrorView(errorDetails);
             }
 
             var assembly = Assembly.LoadFrom(outputAssemblyName);
@@ -211,65 +225,100 @@
                 return () => new NancyRazorErrorView(error);
             }
 
-            if (Activator.CreateInstance(type) as NancyRazorViewBase == null)
+            if (Activator.CreateInstance(type) as INancyRazorView == null)
             {
-                const string error = "Could not construct RazorOutput.Template or it does not inherit from RazorViewBase";
+                const string error = "Could not construct RazorOutput.Template or it does not inherit from INancyRazorView";
                 return () => new NancyRazorErrorView(error);
             }
 
-            return () => (NancyRazorViewBase)Activator.CreateInstance(type);
+            return () => (INancyRazorView)Activator.CreateInstance(type);
         }
 
-        private static Type FindModelType(Block block, Type passedModelType)
+        private static string BuildErrorMessages(IEnumerable<CompilerError> errors)
         {
-            var modelFinder = new ModelFinder();
-            block.Accept(modelFinder);
+            return errors.Select(error => String.Format(
+                "[{0}] Line: {1} Column: {2} - {3} (<a class='LineLink' href='#{1}'>show</a>)",
+                error.ErrorNumber,
+                error.Line,
+                error.Column,
+                error.ErrorText)).Aggregate((s1, s2) => s1 + "<br/>" + s2);
+        }
 
-            if (string.IsNullOrWhiteSpace(modelFinder.ModelTypeName))
+        private static void MarkErrorLines(IEnumerable<CompilerError> errors, IList<string> templateLines)
+        {
+            foreach (var compilerError in errors)
+            {
+                var lineIndex = compilerError.Line - 1;
+                if (lineIndex <= templateLines.Count - 1)
+                {
+                    templateLines[lineIndex] = string.Format("<span class='error'><a name='{0}' />{1}</span>", compilerError.Line, templateLines[lineIndex]);
+                }
+            }
+        }
+
+        private static string[] GetViewBodyLines(ViewLocationResult viewLocationResult)
+        {
+            var templateLines = new List<string>();
+            using (var templateReader = viewLocationResult.Contents.Invoke())
+            {
+                var currentLine = templateReader.ReadLine();
+                while (currentLine != null)
+                {
+                    templateLines.Add(Helpers.HttpUtility.HtmlEncode(currentLine));
+
+                    currentLine = templateReader.ReadLine();
+                }
+            }
+            return templateLines.ToArray();
+        }
+
+        /// <summary>
+        /// Tries to find the model type from the document
+        /// So documents using @model will actually be able to reference the model type
+        /// </summary>
+        /// <param name="block">The document</param>
+        /// <param name="passedModelType">The model type from the base class</param>
+        /// <param name="modelCodeGenerator">The model code generator</param>
+        /// <returns>The model type, if discovered, or the passedModelType if not</returns>
+        private static Type FindModelType(Block block, Type passedModelType, Type modelCodeGenerator)
+        {
+            var modelBlock =
+                block.Flatten().FirstOrDefault(b => b.CodeGenerator.GetType() == modelCodeGenerator);
+
+            if (modelBlock == null)
             {
                 return passedModelType ?? typeof(object);
             }
 
-            Type modelType;
-
-            if (passedModelType != null)
+            if (string.IsNullOrEmpty(modelBlock.Content))
             {
-                modelType = passedModelType;
-                while (modelType != null)
-                {
-                    if (modelType.FullName == modelFinder.ModelTypeName || modelType.Name == modelFinder.ModelTypeName)
-                    {
-                        return modelType;
-                    }
-
-                    modelType = modelType.BaseType;
-                }
-
-                throw new NotSupportedException(string.Format("Unable to discover CLR Type for model by the name of {0}.  Ensure that the model passed to the view is assignable to the model declared in the view.", modelFinder.ModelTypeName));
+                return passedModelType ?? typeof(object);
             }
 
-            modelType = Type.GetType(modelFinder.ModelTypeName);
+            var discoveredModelType = modelBlock.Content.Trim();
+
+            var modelType = Type.GetType(discoveredModelType);
 
             if (modelType != null)
             {
                 return modelType;
             }
 
-            modelType = AppDomainAssemblyTypeScanner.Types.Where(t => t.FullName == modelFinder.ModelTypeName).FirstOrDefault();
+            modelType = AppDomainAssemblyTypeScanner.Types.FirstOrDefault(t => t.FullName == discoveredModelType);
 
             if (modelType != null)
             {
                 return modelType;
             }
 
-            modelType = AppDomainAssemblyTypeScanner.Types.Where(t => t.Name == modelFinder.ModelTypeName).FirstOrDefault();
+            modelType = AppDomainAssemblyTypeScanner.Types.FirstOrDefault(t => t.Name == discoveredModelType);
 
             if (modelType != null)
             {
                 return modelType;
             }
 
-            throw new NotSupportedException(string.Format("Unable to discover CLR Type for model by the name of {0}. Try using a fully qualified type name and ensure that the assembly is added to the configuration file.", modelFinder.ModelTypeName));
+            throw new NotSupportedException(string.Format("Unable to discover CLR Type for model by the name of {0}. Try using a fully qualified type name and ensure that the assembly is added to the configuration file.", discoveredModelType));
         }
 
         private static void AddModelNamespace(GeneratorResults razorResult, Type modelType)
@@ -292,29 +341,44 @@
             return new Uri(assembly.EscapedCodeBase).LocalPath;
         }
 
-        private NancyRazorViewBase GetOrCompileView(ViewLocationResult viewLocationResult, IRenderContext renderContext, Assembly referencingAssembly, Type passedModelType)
+        private INancyRazorView GetOrCompileView(ViewLocationResult viewLocationResult, IRenderContext renderContext, Assembly referencingAssembly, Type passedModelType)
         {
             var viewFactory = renderContext.ViewCache.GetOrAdd(
                 viewLocationResult,
-                x => this.GetCompiledViewFactory(x.Extension, x.Contents.Invoke(), referencingAssembly, passedModelType));
+                x => this.GetCompiledViewFactory(x.Extension, x.Contents.Invoke(), referencingAssembly, passedModelType, viewLocationResult));
 
             var view = viewFactory.Invoke();
-
-            view.Code = string.Empty;
 
             return view;
         }
 
-        private NancyRazorViewBase GetViewInstance(ViewLocationResult viewLocationResult, IRenderContext renderContext, Assembly referencingAssembly, dynamic model)
+        private INancyRazorView GetViewInstance(ViewLocationResult viewLocationResult, IRenderContext renderContext, Assembly referencingAssembly, dynamic model)
         {
-            var modelType = (model == null) ? null :  model.GetType();
+            var modelType = (model == null) ? typeof(object) : model.GetType();
 
-            var view = 
+            var view =
                 this.GetOrCompileView(viewLocationResult, renderContext, referencingAssembly, modelType);
 
             view.Initialize(this, renderContext, model);
 
             return view;
+        }
+
+        /// <summary>
+        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
+        /// </summary>
+        /// <filterpriority>2</filterpriority>
+        public void Dispose()
+        {
+            if (this.viewRenderers == null)
+            {
+                return;
+            }
+
+            foreach (var disposable in this.viewRenderers.OfType<IDisposable>())
+            {
+                disposable.Dispose();
+            }
         }
     }
 }

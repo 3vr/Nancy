@@ -1,6 +1,5 @@
 ﻿namespace Nancy.ViewEngines.Spark
 {
-    using System;
     using System.Collections.Generic;
     using System.Configuration;
     using System.Dynamic;
@@ -16,20 +15,28 @@
     public class SparkViewEngine : IViewEngine
     {
         private readonly IDescriptorBuilder descriptorBuilder;
-        private readonly ISparkViewEngine engine;
+        private readonly global::Spark.SparkViewEngine engine;
         private readonly ISparkSettings settings;
+        private readonly string[] extensions = new[] { "spark", "shade" };
+
+        public SparkViewEngine()
+            : this(new DefaultRootPathProvider())
+        {
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SparkViewEngine"/> class.
         /// </summary>
-        public SparkViewEngine()
+        public SparkViewEngine(IRootPathProvider rootPathProvider)
         {
             this.settings = (ISparkSettings) ConfigurationManager.GetSection("spark") ?? new SparkSettings();
-
-            this.engine = new global::Spark.SparkViewEngine(this.settings)
-            {
-                DefaultPageBaseType = typeof(NancySparkView).FullName
-            };
+            
+            this.engine = 
+                new global::Spark.SparkViewEngine(this.settings)
+                {
+                    DefaultPageBaseType = typeof (NancySparkView).FullName,
+                    BindingProvider = new NancyBindingProvider(rootPathProvider),
+                };
 
             this.descriptorBuilder = new DefaultDescriptorBuilder(this.engine);
         }
@@ -41,7 +48,7 @@
         /// <remarks>The extensions should not have a leading dot in the name.</remarks>
         public IEnumerable<string> Extensions
         {
-            get { yield return "spark"; }
+            get { return this.extensions; }
         }
 
         private SparkViewEngineResult CreateView<TModel>(ViewLocationResult viewLocationResult, TModel model, IRenderContext renderContext)
@@ -69,7 +76,7 @@
 
         private static string GetViewFolderKey(ViewLocationResult viewLocationResult)
         {
-            return string.Concat(GetNamespaceEncodedPathViewPath(viewLocationResult.Location), Path.DirectorySeparatorChar, viewLocationResult.Name, ".", viewLocationResult.Extension);
+            return string.Concat(viewLocationResult.Location, Path.DirectorySeparatorChar, viewLocationResult.Name, ".", viewLocationResult.Extension);
         }
 
         private SparkViewEngineResult LocateView(string viewPath, string viewName, ViewLocationResult viewLocationResult, IRenderContext renderContext)
@@ -77,7 +84,7 @@
             var searchedLocations = new List<string>();
 
             var descriptorParams = new BuildDescriptorParams(
-                GetNamespaceEncodedPathViewPath(viewPath),
+                viewPath,
                 viewName,
                 null,
                 true,
@@ -103,11 +110,6 @@
             }
 
             return new SparkViewEngineResult(nancySparkView);
-        }
-
-        private static string GetNamespaceEncodedPathViewPath(string viewPath)
-        {
-            return viewPath.Replace('/', '_');
         }
 
         public void Initialize(ViewEngineStartupContext viewEngineStartupContext)

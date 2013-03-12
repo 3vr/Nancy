@@ -1,6 +1,9 @@
 namespace Nancy.Demo.Hosting.Aspnet
 {
     using System;
+    using System.IO;
+    using System.Linq;
+    using IO;
     using Nancy.Demo.Hosting.Aspnet.Models;
     using Nancy.Routing;
     using Security;
@@ -11,6 +14,19 @@ namespace Nancy.Demo.Hosting.Aspnet
         {
             Get["/"] = x => {
                 return View["routes", routeCacheProvider.GetCache()];
+            };
+
+            Get["/negotiated"] = parameters => {
+                return Negotiate
+                    .WithModel(new RatPack {FirstName = "Nancy "})
+                    .WithMediaRangeModel("text/html", new RatPack {FirstName = "Nancy fancy pants"})
+                    .WithView("negotiatedview")
+                    .WithHeader("X-Custom", "SomeValue");
+            };
+
+            Get["/user/{name}"] = parameters =>
+            {
+                return (string)parameters.name;
             };
 
             Get["/filtered", r => true] = x => {
@@ -50,6 +66,12 @@ namespace Nancy.Demo.Hosting.Aspnet
                 return View["razor.cshtml", model];
             };
 
+            Get["/razorError"] = x =>
+            {
+                var model = new RatPack { FirstName = "Frank" };
+                return View["razor-error.cshtml", model];
+            };
+
             Get["/razor-simple"] = x =>
             {
                 var model = new RatPack { FirstName = "Frank" };
@@ -71,6 +93,8 @@ namespace Nancy.Demo.Hosting.Aspnet
                 return View["razor-strong.vbhtml", new RatPack { FirstName = "Frank" }];
             };
 
+            Get["/razor2"] = _ => new Razor2();
+
             Get["/ssve"] = x =>
             {
                 var model = new RatPack { FirstName = "You" };
@@ -79,16 +103,6 @@ namespace Nancy.Demo.Hosting.Aspnet
 
             Get["/viewmodelconvention"] = x => {
                 return View[new SomeViewModel()];
-            };
-
-            Get["/ndjango"] = x => {
-                var model = new RatPack { FirstName = "Michael" };
-                return View["ndjango.django", model];
-            };
-
-            Get["/ndjango-extends"] = x => {
-                var model = new RatPack { FirstName = "Michael" };
-                return View["with-master.django", model];
             };
 
             Get["/spark"] = x => {
@@ -104,12 +118,12 @@ namespace Nancy.Demo.Hosting.Aspnet
 
             Get["/json"] = x => {
                 var model = new RatPack { FirstName = "Andy" };
-                return Response.AsJson(model);
+                return this.Response.AsJson(model);
             };
 
             Get["/xml"] = x => {
                 var model = new RatPack { FirstName = "Andy" };
-                return Response.AsXml(model);
+                return this.Response.AsXml(model);
             };
 
             Get["/session"] = x => {
@@ -151,7 +165,7 @@ namespace Nancy.Demo.Hosting.Aspnet
             {
                 this.ValidateCsrfToken();
 
-                return string.Format("Hello {0}!", Request.Form.Name);
+                return string.Format("Hello {0}!", this.Request.Form.Name);
             };
 
             Get["/csrfWithExpiry"] = x =>
@@ -166,10 +180,30 @@ namespace Nancy.Demo.Hosting.Aspnet
                 {
                     this.ValidateCsrfToken(TimeSpan.FromSeconds(20));
 
-                    return string.Format("Hello {0}!", Request.Form.Name);
+                    return string.Format("Hello {0}!", this.Request.Form.Name);
                 };
 
             Get["/viewNotFound"] = _ => View["I-do-not-exist"];
+
+            Get["/fileupload"] = x =>
+            {
+                return View["FileUpload", new { Posted = "Nothing" }];
+            };
+
+            Post["/fileupload"] = x =>
+            {
+                var file = this.Request.Files.FirstOrDefault();
+
+                string fileDetails = "Nothing";
+
+                if (file != null)
+                {
+                    fileDetails = string.Format("{3} - {0} ({1}) {2}bytes", file.Name, file.ContentType, file.Value.Length, file.Key);
+                }
+
+                return View["FileUpload", new { Posted = fileDetails }];
+            };
+
         }
     }
 }

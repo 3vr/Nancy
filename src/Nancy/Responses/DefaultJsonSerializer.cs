@@ -1,6 +1,7 @@
 ﻿namespace Nancy.Responses
 {
     using System;
+    using System.Collections.Generic;
     using System.IO;
     using Json;
 
@@ -15,7 +16,16 @@
         /// <returns>True if supported, false otherwise</returns>
         public bool CanSerialize(string contentType)
         {
-            return this.IsJsonType(contentType);
+            return IsJsonType(contentType);
+        }
+
+        /// <summary>
+        /// Gets the list of extensions that the serializer can handle.
+        /// </summary>
+        /// <value>An <see cref="IEnumerable{T}"/> of extensions if any are available, otherwise an empty enumerable.</value>
+        public IEnumerable<string> Extensions
+        {
+            get { yield return "json"; }
         }
 
         /// <summary>
@@ -47,7 +57,7 @@
         /// </summary>
         /// <param name="contentType">Request content type</param>
         /// <returns>True if content type is JSON, false otherwise</returns>
-        private bool IsJsonType(string contentType)
+        private static bool IsJsonType(string contentType)
         {
             if (string.IsNullOrEmpty(contentType))
             {
@@ -57,6 +67,7 @@
             var contentMimeType = contentType.Split(';')[0];
 
             return contentMimeType.Equals("application/json", StringComparison.InvariantCultureIgnoreCase) ||
+                   contentMimeType.StartsWith("application/json-", StringComparison.InvariantCultureIgnoreCase) ||
                    contentMimeType.Equals("text/json", StringComparison.InvariantCultureIgnoreCase) ||
                   (contentMimeType.StartsWith("application/vnd", StringComparison.InvariantCultureIgnoreCase) &&
                    contentMimeType.EndsWith("+json", StringComparison.InvariantCultureIgnoreCase));

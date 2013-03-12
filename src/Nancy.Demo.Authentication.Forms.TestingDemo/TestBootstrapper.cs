@@ -7,18 +7,25 @@ namespace Nancy.Demo.Authentication.Forms.TestingDemo
 
     public class TestBootstrapper : FormsAuthBootstrapper
     {
-        protected override Type RootPathProvider
+        protected override IRootPathProvider RootPathProvider
         {
             get
             {
-                // TODO - figure out a nicer way to do this
-                var assemblyPath = Path.GetDirectoryName(typeof(FormsAuthBootstrapper).Assembly.CodeBase).Replace(@"file:\", string.Empty);
-                var rootPath = PathHelper.GetParent(assemblyPath, 3);
-                rootPath = Path.Combine(rootPath, @"Nancy.Demo.Authentication.Forms");
+                var assemblyFilePath =
+                    new Uri(typeof(FormsAuthBootstrapper).Assembly.CodeBase).LocalPath;
+
+                var assemblyPath =
+                    Path.GetDirectoryName(assemblyFilePath);
+                
+                var rootPath = 
+                    PathHelper.GetParent(assemblyPath, 3);
+                
+                rootPath = 
+                    Path.Combine(rootPath, @"Nancy.Demo.Authentication.Forms");
 
                 FakeRootPathProvider.RootPath = rootPath;
 
-                return typeof(FakeRootPathProvider);
+                return new FakeRootPathProvider();
             }
         }
     }

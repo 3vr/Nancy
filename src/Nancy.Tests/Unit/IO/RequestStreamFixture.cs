@@ -12,12 +12,40 @@ namespace Nancy.Tests.Unit.IO
 
         public RequestStreamFixture()
         {
-            this.stream = A.Fake<Stream>();
+            this.stream = A.Fake<Stream>(x => {
+                x.Implements(typeof(IDisposable));
+            });
 
             A.CallTo(() => this.stream.CanRead).Returns(true);
             A.CallTo(() => this.stream.CanSeek).Returns(true);
             A.CallTo(() => this.stream.CanTimeout).Returns(true);
             A.CallTo(() => this.stream.CanWrite).Returns(true);
+        }
+
+        [Fact]
+        public void Should_not_dispose_wrapped_stream_when_not_switched()
+        {
+            // Given
+            var instance = RequestStream.FromStream(this.stream, 0, 1, true);
+
+            // When
+            instance.Dispose();
+
+            // Then
+            A.CallTo(() => ((IDisposable)this.stream).Dispose()).MustNotHaveHappened();
+        }
+
+        [Fact]
+        public void Should_dispose_wrapped_stream_when_created_internally()
+        {
+            // Given
+            var instance = RequestStream.FromStream(null, 0, 1, true);
+
+            // When
+            instance.Dispose();
+
+            // Then
+            A.CallTo(() => ((IDisposable)this.stream).Dispose()).MustNotHaveHappened();
         }
 
         [Fact]
@@ -333,19 +361,6 @@ namespace Nancy.Tests.Unit.IO
 
             // Then
             result.ShouldEqual(5);
-        }
-
-        [Fact]
-        public void Should_close_the_underlaying_stream_when_being_closed()
-        {
-            // Given
-            var request = RequestStream.FromStream(this.stream, 0, 1, false);
-
-            // When
-            request.Close();
-
-            // Then
-            A.CallTo(() => this.stream.Close()).MustHaveHappened();
         }
 
         [Fact]

@@ -4,11 +4,9 @@
     using System.Collections.Generic;
     using System.Globalization;
     using System.Net;
-    using System.Threading;
     using System.Linq;
     using IO;
     using Nancy.Bootstrapper;
-    using Nancy.Cookies;
     using Nancy.Extensions;
 	using Nancy.Helpers;
 
@@ -19,88 +17,135 @@
     /// NancyHost uses <see cref="System.Net.HttpListener"/> internally. Therefore, it requires full .net 4.0 profile (not client profile)
     /// to run. <see cref="Start"/> will launch a thread that will listen for requests and then process them. All processing is done
     /// within a single thread - self hosting is not intended for production use, but rather as a development server.
+    ///NancyHost needs <see cref="SerializableAttribute"/> in order to be used from another appdomain under mono. Working with 
+    /// AppDomains is necessary if you want to unload the dependencies that come with NancyHost.
     /// </remarks>
+    [Serializable]
     public class NancyHost  
     {
         private readonly IList<Uri> baseUriList;
         private readonly HttpListener listener;
         private readonly INancyEngine engine;
+        private readonly HostConfiguration configuration;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUris"/>.
+        /// Uses the default configuration
+        /// </summary>
+        /// <param name="baseUris">The <see cref="Uri"/>s that the host will listen to.</param>
         public NancyHost(params Uri[] baseUris)
-            : this(NancyBootstrapperLocator.Bootstrapper, baseUris){}
+            : this(NancyBootstrapperLocator.Bootstrapper, new HostConfiguration(), baseUris) { }
 
-        public NancyHost(INancyBootstrapper bootStrapper, params Uri[] baseUris)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUris"/>.
+        /// Uses the specified configuration.
+        /// </summary>
+        /// <param name="baseUris">The <see cref="Uri"/>s that the host will listen to.</param>
+        /// <param name="configuration">Configuration to use</param>
+        public NancyHost(HostConfiguration configuration, params Uri[] baseUris)
+            : this(NancyBootstrapperLocator.Bootstrapper, configuration, baseUris){}
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUris"/>, using
+        /// the provided <paramref name="bootstrapper"/>.
+        /// Uses the default configuration
+        /// </summary>
+        /// <param name="bootstrapper">The bootstrapper that should be used to handle the request.</param>
+        /// <param name="baseUris">The <see cref="Uri"/>s that the host will listen to.</param>
+        public NancyHost(INancyBootstrapper bootstrapper, params Uri[] baseUris)
+            : this(bootstrapper, new HostConfiguration(), baseUris)
         {
-            baseUriList = baseUris;
-            listener = new HttpListener();
-
-            foreach (var baseUri in baseUriList)
-            {
-                listener.Prefixes.Add(baseUri.ToString());
-            }
-
-            bootStrapper.Initialise();
-            engine = bootStrapper.GetEngine();
         }
 
-        public NancyHost(Uri baseUri, INancyBootstrapper bootStrapper) : this (bootStrapper, baseUri) {}
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUris"/>, using
+        /// the provided <paramref name="bootstrapper"/>.
+        /// Uses the specified configuration.
+        /// </summary>
+        /// <param name="bootstrapper">The bootstrapper that should be used to handle the request.</param>
+        /// <param name="configuration">Configuration to use</param>
+        /// <param name="baseUris">The <see cref="Uri"/>s that the host will listen to.</param>
+        public NancyHost(INancyBootstrapper bootstrapper, HostConfiguration configuration, params Uri[] baseUris)
+        {
+            this.configuration = configuration ?? new HostConfiguration();
+            this.baseUriList = baseUris;
+            this.listener = new HttpListener();
 
+            bootstrapper.Initialise();
+            this.engine = bootstrapper.GetEngine();
+        }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUri"/>, using
+        /// the provided <paramref name="bootstrapper"/>.
+        /// Uses the default configuration
+        /// </summary>
+        /// <param name="baseUri">The <see cref="Uri"/> that the host will listen to.</param>
+        /// <param name="bootstrapper">The bootstrapper that should be used to handle the request.</param>
+        public NancyHost(Uri baseUri, INancyBootstrapper bootstrapper)
+            : this(bootstrapper, new HostConfiguration(), baseUri)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHost"/> class for the specfied <paramref name="baseUri"/>, using
+        /// the provided <paramref name="bootstrapper"/>.
+        /// Uses the specified configuration.
+        /// </summary>
+        /// <param name="baseUri">The <see cref="Uri"/> that the host will listen to.</param>
+        /// <param name="bootstrapper">The bootstrapper that should be used to handle the request.</param>
+        /// <param name="configuration">Configuration to use</param>
+        public NancyHost(Uri baseUri, INancyBootstrapper bootstrapper, HostConfiguration configuration)
+            : this (bootstrapper, configuration, baseUri)
+        {
+        }
+
+        /// <summary>
+        /// Start listening for incoming requests with the given configuration
+        /// </summary>
         public void Start()
         {
+            this.AddPrefixes();
+
             listener.Start();
             try
             {
                 listener.BeginGetContext(GotCallback, null);
             }
-            catch (HttpListenerException)
+            catch (Exception e)
             {
-                // this will be thrown when listener is closed while waiting for a request
-                return;
-            }
+                this.configuration.UnhandledExceptionCallback.Invoke(e);
 
-        }
-
-        private void GotCallback(IAsyncResult ar)
-        {
-            try
-            {
-                HttpListenerContext ctx = listener.EndGetContext(ar);
-                listener.BeginGetContext(GotCallback, null);
-                Process(ctx);
-            }
-            catch (HttpListenerException)
-            {
-                // this will be thrown when listener is closed while waiting for a request
-                return;
+                throw;
             }
         }
 
-        private void Process(HttpListenerContext ctx)
-        {
-            var nancyRequest = ConvertRequestToNancyRequest(ctx.Request);
-            using (var nancyContext = engine.HandleRequest(nancyRequest))
-            {
-                ConvertNancyResponseToResponse(nancyContext.Response, ctx.Response);
-            }
-        }
-
+        /// <summary>
+        /// Stop listening for incoming requests.
+        /// </summary>
         public void Stop()
         {
             listener.Stop();
         }
 
-    
-        private static Uri GetUrlAndPathComponents(Uri uri) 
+        private void AddPrefixes()
         {
-            // ensures that for a given url only the
-            //  scheme://host:port/paths/somepath
-            return new Uri(uri.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.Unescaped));
+            foreach (var baseUri in baseUriList)
+            {
+                var prefix = baseUri.ToString();
+
+                if (this.configuration.RewriteLocalhost && !baseUri.Host.Contains("."))
+                {
+                    prefix = prefix.Replace("localhost", "+");
+                }
+
+                listener.Prefixes.Add(prefix);
+            }
         }
 
         private Request ConvertRequestToNancyRequest(HttpListenerRequest request)
         {
-            var baseUri = baseUriList.FirstOrDefault(uri => uri.IsBaseOf(request.Url));
+            var baseUri = baseUriList.FirstOrDefault(uri => uri.IsCaseInsensitiveBaseOf(request.Url));
 
             if (baseUri == null)
             {
@@ -110,16 +155,14 @@
             var expectedRequestLength =
                 GetExpectedRequestLength(request.Headers.ToDictionary());
 
-            var relativeUrl =
-                GetUrlAndPathComponents(baseUri).MakeRelativeUri(GetUrlAndPathComponents(request.Url));
+            var relativeUrl = baseUri.MakeAppLocalPath(request.Url);
 
-            var nancyUrl = new Url
-            {
+            var nancyUrl = new Url {
                 Scheme = request.Url.Scheme,
                 HostName = request.Url.Host,
                 Port = request.Url.IsDefaultPort ? null : (int?)request.Url.Port,
                 BasePath = baseUri.AbsolutePath.TrimEnd('/'),
-                Path = string.Concat("/", HttpUtility.UrlDecode(relativeUrl.ToString())),
+                Path = HttpUtility.UrlDecode(relativeUrl),
                 Query = request.Url.Query,
                 Fragment = request.Url.Fragment,
             };
@@ -130,6 +173,32 @@
                 RequestStream.FromStream(request.InputStream, expectedRequestLength, true),
                 request.Headers.ToDictionary(), 
                 (request.RemoteEndPoint != null) ? request.RemoteEndPoint.Address.ToString() : null);
+        }
+
+        private static void ConvertNancyResponseToResponse(Response nancyResponse, HttpListenerResponse response)
+        {
+            foreach (var header in nancyResponse.Headers)
+            {
+                response.AddHeader(header.Key, header.Value);
+            }
+
+            foreach (var nancyCookie in nancyResponse.Cookies)
+            {
+                response.Headers.Add(HttpResponseHeader.SetCookie, nancyCookie.ToString());
+            }
+
+            if (nancyResponse.ContentType != null)
+            {
+                response.ContentType = nancyResponse.ContentType;
+            }
+            response.StatusCode = (int)nancyResponse.StatusCode;
+
+            var output = response.OutputStream;
+            nancyResponse.Contents.Invoke(output);
+            if (nancyResponse.DisposeStream)
+            {
+                output.Dispose();
+            }
         }
 
         private static long GetExpectedRequestLength(IDictionary<string, IEnumerable<string>> incomingHeaders)
@@ -153,48 +222,56 @@
             }
 
             long contentLength;
-            if (!long.TryParse(headerValue, NumberStyles.Any, CultureInfo.InvariantCulture, out contentLength))
-            {
-                return 0;
-            }
 
-            return contentLength;
+            return !long.TryParse(headerValue, NumberStyles.Any, CultureInfo.InvariantCulture, out contentLength) ?
+                0 : 
+                contentLength;
         }
 
-        private static void ConvertNancyResponseToResponse(Response nancyResponse, HttpListenerResponse response)
+        private void GotCallback(IAsyncResult ar)
         {
-            foreach (var header in nancyResponse.Headers)
+            try
             {
-                response.AddHeader(header.Key, header.Value);
+                var ctx = listener.EndGetContext(ar);
+                listener.BeginGetContext(GotCallback, null);
+                Process(ctx);
             }
-
-            foreach (var nancyCookie in nancyResponse.Cookies)
+            catch (Exception e)
             {
-                response.Headers.Add(HttpResponseHeader.SetCookie, nancyCookie.ToString());
-            }
+                this.configuration.UnhandledExceptionCallback.Invoke(e);
 
-            response.ContentType = nancyResponse.ContentType;
-            response.StatusCode = (int)nancyResponse.StatusCode;
-
-            var output = response.OutputStream;
-            nancyResponse.Contents.Invoke(output);
-            if (nancyResponse.DisposeStream)
-            {
-                output.Dispose();
+                try
+                {
+                    listener.BeginGetContext(GotCallback, null);
+                }
+                catch
+                {
+                    this.configuration.UnhandledExceptionCallback.Invoke(e);
+                }
             }
         }
 
-        private static Cookie ConvertCookie(INancyCookie nancyCookie)
+        private void Process(HttpListenerContext ctx)
         {
-            var cookie = 
-                new Cookie(nancyCookie.EncodedName, nancyCookie.EncodedValue, nancyCookie.Path, nancyCookie.Domain);
-
-            if (nancyCookie.Expires.HasValue)
+            try
             {
-                cookie.Expires = nancyCookie.Expires.Value;
+                var nancyRequest = ConvertRequestToNancyRequest(ctx.Request);
+                using (var nancyContext = engine.HandleRequest(nancyRequest))
+                {
+                    try
+                    {
+                        ConvertNancyResponseToResponse(nancyContext.Response, ctx.Response);
+                    }
+                    catch (Exception e)
+                    {
+                        this.configuration.UnhandledExceptionCallback.Invoke(e);
+                    }
+                }
             }
-
-            return cookie;
+            catch (Exception e)
+            {
+                this.configuration.UnhandledExceptionCallback.Invoke(e);
+            }
         }
     }
 }

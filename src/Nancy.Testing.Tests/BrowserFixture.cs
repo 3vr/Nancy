@@ -1,3 +1,4 @@
+
 namespace Nancy.Testing.Tests
 {
     using System;
@@ -11,6 +12,8 @@ namespace Nancy.Testing.Tests
     using Nancy.Helpers;
     using Nancy.Session;
     using Xunit;
+    using FakeItEasy;
+    using Nancy.Authentication.Forms;
 
     public class BrowserFixture
     {
@@ -41,6 +44,23 @@ namespace Nancy.Testing.Tests
 
             // Then
             result.Body.AsString().ShouldEqual(thisIsMyRequestBody);
+        }
+
+        [Fact]
+        public void Should_be_able_to_set_user_host_address()
+        {
+            // Given
+            const string userHostAddress = "127.0.0.1";
+
+            // When
+            var result = browser.Get("/userHostAddress", with =>
+                                                         {
+                                                             with.HttpRequest();
+                                                             with.UserHostAddress(userHostAddress);
+                                                         });
+
+            // Then
+            result.Body.AsString().ShouldEqual(userHostAddress);
         }
 
         [Fact]
@@ -270,6 +290,33 @@ namespace Nancy.Testing.Tests
             result.Body.AsString().ShouldEqual("ajax");
         }
 
+        [Fact]
+        public void Should_add_forms_authentication_cookie_to_the_request()
+        {
+            var userId = A.Dummy<Guid>();
+
+            var formsAuthConfig = new FormsAuthenticationConfiguration()
+            {
+                RedirectUrl = "/login",
+                UserMapper = A.Fake<IUserMapper>(),
+            };
+
+            var encryptedId = formsAuthConfig.CryptographyConfiguration.EncryptionProvider.Encrypt(userId.ToString());
+            var hmacBytes = formsAuthConfig.CryptographyConfiguration.HmacProvider.GenerateHmac(encryptedId);
+            var hmacString = Convert.ToBase64String(hmacBytes);
+            var cookieContents = String.Format("{1}{0}", encryptedId, hmacString);
+
+            var response = browser.Get("/cookie", (with) =>
+            {
+                with.HttpRequest();
+                with.FormsAuth(userId, formsAuthConfig);
+            });
+
+            var cookie = response.Cookies.Single(c => c.Name == FormsAuthentication.FormsAuthenticationCookieName);
+            var cookieValue = HttpUtility.UrlDecode(cookie.Value);
+            cookieValue.ShouldEqual(cookieContents);
+        }
+
         public class EchoModel
         {
             public string SomeString { get; set; }
@@ -284,7 +331,7 @@ namespace Nancy.Testing.Tests
 
                 Post["/"] = ctx =>
                     {
-                        var body = new StreamReader(Context.Request.Body).ReadToEnd();
+                        var body = new StreamReader(this.Context.Request.Body).ReadToEnd();
                         return new Response
                                 {
                                     Contents = stream =>
@@ -300,7 +347,7 @@ namespace Nancy.Testing.Tests
                 {
                     var response = (Response)"Cookies";
 
-                    foreach (var cookie in Request.Cookies)
+                    foreach (var cookie in this.Request.Cookies)
                     {
                         response.AddCookie(cookie.Key, cookie.Value);
                     }
@@ -309,6 +356,8 @@ namespace Nancy.Testing.Tests
                 };
 
                 Get["/nothing"] = ctx => string.Empty;
+
+                Get["/userHostAddress"] = ctx => this.Request.UserHostAddress;
 
                 Get["/session"] = ctx =>
                     {
@@ -326,7 +375,7 @@ namespace Nancy.Testing.Tests
                         return response;
                     };
 
-                Get["/type"] = _ => Request.Url.Scheme.ToLower();
+                Get["/type"] = _ => this.Request.Url.Scheme.ToLower();
 
                 Get["/ajax"] = _ => this.Request.IsAjaxRequest() ? "ajax" : "not-ajax";
             }

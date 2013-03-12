@@ -35,7 +35,7 @@ namespace Nancy.Tests.Unit.Bootstrapper.Base
         }
 
         [Fact]
-        public void Should_throw_if_get_engine_called_without_being_initialised()
+        public virtual void Should_throw_if_get_engine_called_without_being_initialised()
         {
             var result = Record.Exception(() => this.Bootstrapper.GetEngine());
 
@@ -43,7 +43,7 @@ namespace Nancy.Tests.Unit.Bootstrapper.Base
         }
 
         [Fact]
-        public void Should_resolve_engine_when_initialised()
+        public virtual void Should_resolve_engine_when_initialised()
         {
             this.Bootstrapper.Initialise();
 
@@ -54,7 +54,7 @@ namespace Nancy.Tests.Unit.Bootstrapper.Base
         }
 
         [Fact]
-        public void Should_use_types_from_config()
+        public virtual void Should_use_types_from_config()
         {
             this.Bootstrapper.Initialise();
 
@@ -64,7 +64,7 @@ namespace Nancy.Tests.Unit.Bootstrapper.Base
         }
 
         [Fact]
-        public void Should_register_config_types_as_singletons()
+        public virtual void Should_register_config_types_as_singletons()
         {
             this.Bootstrapper.Initialise();
 
@@ -142,6 +142,11 @@ namespace Nancy.Tests.Unit.Bootstrapper.Base
             /// <param name="onComplete">Delegate to call when the request is complete</param>
             /// <param name="onError">Deletate to call when any errors occur</param>
             public void HandleRequest(Request request, Action<NancyContext> onComplete, Action<Exception> onError)
+            {
+                throw new NotImplementedException();
+            }
+
+            public void HandleRequest(Request request, Func<NancyContext, NancyContext> preRequest, Action<NancyContext> onComplete, Action<Exception> onError)
             {
                 throw new NotImplementedException();
             }

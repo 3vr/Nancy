@@ -10,6 +10,7 @@
     using Nancy.Diagnostics;
     using Nancy.ErrorHandling;
     using Nancy.Routing;
+    using Nancy.Culture;
 
     /// <summary>
     /// Default engine for handling Nancy <see cref="Request"/>s.
@@ -19,45 +20,45 @@
         public const string ERROR_KEY = "ERROR_TRACE";
         public const string ERROR_EXCEPTION = "ERROR_EXCEPTION";
 
-        private readonly IRouteResolver resolver;
-        private readonly IRouteCache routeCache;
+        private readonly IRequestDispatcher dispatcher;
         private readonly INancyContextFactory contextFactory;
         private readonly IRequestTracing requestTracing;
-        private readonly IEnumerable<IErrorHandler> errorHandlers;
+        private readonly DiagnosticsConfiguration diagnosticsConfiguration;
+        private readonly IEnumerable<IStatusCodeHandler> statusCodeHandlers;
+        private readonly IStaticContentProvider staticContentProvider;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NancyEngine"/> class.
         /// </summary>
-        /// <param name="resolver">An <see cref="IRouteResolver"/> instance that will be used to resolve a route, from the modules, that matches the incoming <see cref="Request"/>.</param>
+        /// <param name="dispatcher">An <see cref="IRouteResolver"/> instance that will be used to resolve a route, from the modules, that matches the incoming <see cref="Request"/>.</param>
         /// <param name="contextFactory">A factory for creating contexts</param>
-        /// <param name="errorHandlers">Error handlers</param>
-        public NancyEngine(IRouteResolver resolver, INancyContextFactory contextFactory, IEnumerable<IErrorHandler> errorHandlers, IRequestTracing requestTracing)
+        /// <param name="statusCodeHandlers">Error handlers</param>
+        /// <param name="requestTracing">The request tracing instance.</param>
+        /// <param name="diagnosticsConfiguration"></param>
+        /// <param name="staticContentProvider">The provider to use for serving static content</param>
+        public NancyEngine(IRequestDispatcher dispatcher, INancyContextFactory contextFactory, IEnumerable<IStatusCodeHandler> statusCodeHandlers, IRequestTracing requestTracing, DiagnosticsConfiguration diagnosticsConfiguration, IStaticContentProvider staticContentProvider)
         {
-            if (resolver == null)
+            if (dispatcher == null)
             {
-                throw new ArgumentNullException("resolver", "The resolver parameter cannot be null.");
+                throw new ArgumentNullException("dispatcher", "The resolver parameter cannot be null.");
             }
-
-            //if (routeCache == null)
-            //{
-            //    throw new ArgumentNullException("routeCache", "The routeCache parameter cannot be null.");
-            //}
 
             if (contextFactory == null)
             {
                 throw new ArgumentNullException("contextFactory");
             }
 
-            if (errorHandlers == null)
+            if (statusCodeHandlers == null)
             {
-                throw new ArgumentNullException("errorHandlers");
+                throw new ArgumentNullException("statusCodeHandlers");
             }
 
-            this.resolver = resolver;
-            //this.routeCache = routeCache;
+            this.dispatcher = dispatcher;
             this.contextFactory = contextFactory;
-            this.errorHandlers = errorHandlers;
+            this.statusCodeHandlers = statusCodeHandlers;
             this.requestTracing = requestTracing;
+            this.diagnosticsConfiguration = diagnosticsConfiguration;
+            this.staticContentProvider = staticContentProvider;
         }
 
         /// <summary>
@@ -73,21 +74,42 @@
         /// <returns>A <see cref="NancyContext"/> instance containing the request/response context.</returns>
         public NancyContext HandleRequest(Request request)
         {
+            return this.HandleRequest(request, context => context);
+        }
+
+        /// <summary>
+        /// Handles an incoming <see cref="Request"/>.
+        /// </summary>
+        /// <param name="request">An <see cref="Request"/> instance, containing the information about the current request.</param>
+        /// <param name="preRequest">Delegate to call before the request is processed</param>
+        /// <returns>A <see cref="NancyContext"/> instance containing the request/response context.</returns>
+        private NancyContext HandleRequest(Request request, Func<NancyContext, NancyContext> preRequest)
+        {
             if (request == null)
             {
                 throw new ArgumentNullException("request", "The request parameter cannot be null.");
             }
 
-            var context = this.contextFactory.Create();
-            context.Request = request;
+            var context = this.contextFactory.Create(request);
+
+            if (preRequest != null)
+            {
+                context = preRequest(context);
+            }
+
+            var staticContentResponse = this.staticContentProvider.GetContent(context);
+            if (staticContentResponse != null)
+            {
+                context.Response = staticContentResponse;
+                return context;
+            }
 
             var pipelines =
                 this.RequestPipelinesFactory.Invoke(context);
 
             this.InvokeRequestLifeCycle(context, pipelines);
-            AddNancyVersionHeaderToResponse(context);
 
-            CheckErrorHandler(context);
+            this.CheckStatusCodeHandler(context);
 
             this.SaveTraceInformation(context);
 
@@ -123,7 +145,7 @@
         private bool EnableTracing(NancyContext ctx)
         {
             return StaticConfiguration.EnableRequestTracing &&
-                   !ctx.Request.Path.StartsWith(DiagnosticsHook.ControlPanelPrefix);
+                   !ctx.Items.ContainsKey(DiagnosticsHook.ItemsKey);
         }
 
         private Guid GetDiagnosticsSessionGuid(NancyContext ctx)
@@ -162,45 +184,40 @@
         /// <param name="onError">Deletate to call when any errors occur</param>
         public void HandleRequest(Request request, Action<NancyContext> onComplete, Action<Exception> onError)
         {
+            this.HandleRequest(request, context => context, onComplete, onError);
+        }
+
+        public void HandleRequest(Request request, Func<NancyContext, NancyContext> preRequest, Action<NancyContext> onComplete, Action<Exception> onError)
+        {
             // TODO - potentially do some things sync like the pre-req hooks?
             // Possibly not worth it as the thread pool is quite clever
             // when it comes to fast running tasks such as ones where the prehook returns a redirect.
             ThreadPool.QueueUserWorkItem(s =>
+            {
+                try
                 {
-                    try
-                    {
-                        onComplete.Invoke(this.HandleRequest(request));
-                    }
-                    catch (Exception e)
-                    {
-                        onError.Invoke(e);
-                    }
-                });
+                    onComplete.Invoke(this.HandleRequest(request, preRequest));
+                }
+                catch (Exception e)
+                {
+                    onError.Invoke(e);
+                }
+            });
         }
 
-        private static void AddNancyVersionHeaderToResponse(NancyContext context)
+        private void CheckStatusCodeHandler(NancyContext context)
         {
             if (context.Response == null)
             {
                 return;
             }
 
-            var version =
-                typeof(INancyEngine).Assembly.GetName().Version;
-
-            context.Response.Headers["Nancy-Version"] = version.ToString();
-        }
-
-        private void CheckErrorHandler(NancyContext context)
-        {
-            if (context.Response == null)
+            foreach (var statusCodeHandler in this.statusCodeHandlers)
             {
-                return;
-            }
-
-            foreach (var errorHandler in this.errorHandlers.Where(e => e.HandlesStatusCode(context.Response.StatusCode)))
-            {
-                errorHandler.Handle(context.Response.StatusCode, context);
+                if (statusCodeHandler.HandlesStatusCode(context.Response.StatusCode, context))
+                {
+                    statusCodeHandler.Handle(context.Response.StatusCode, context);
+                }
             }
         }
 
@@ -210,12 +227,12 @@
             {
                 InvokePreRequestHook(context, pipelines.BeforeRequest);
 
-                if (context.Response == null) 
+                if (context.Response == null)
                 {
-                    this.ResolveAndInvokeRoute(context);
+                    this.dispatcher.Dispatch(context);
                 }
 
-                if (pipelines.AfterRequest != null) 
+                if (pipelines.AfterRequest != null)
                 {
                     pipelines.AfterRequest.Invoke(context);
                 }
@@ -244,7 +261,7 @@
             try
             {
                 if (pipeline == null)
-                { 
+                {
                     throw new RequestExecutionException(ex);
                 }
 
@@ -262,46 +279,6 @@
                 context.Response = new Response { StatusCode = HttpStatusCode.InternalServerError };
                 context.Items[ERROR_KEY] = e.ToString();
                 context.Items[ERROR_EXCEPTION] = e;
-            }
-        }
-
-        private void ResolveAndInvokeRoute(NancyContext context)
-        {
-            var resolveResult = this.resolver.Resolve(context);
-
-            context.Parameters = resolveResult.Item2; 
-            var resolveResultPreReq = resolveResult.Item3;
-            var resolveResultPostReq = resolveResult.Item4;
-            ExecuteRoutePreReq(context, resolveResultPreReq);
-
-            if (context.Response == null)
-            {
-                context.Response = resolveResult.Item1.Invoke(resolveResult.Item2);
-            }
-
-            if (context.Request.Method.ToUpperInvariant() == "HEAD")
-            {
-                context.Response = new HeadResponse(context.Response);
-            }
-
-            if (resolveResultPostReq != null)
-            {
-                resolveResultPostReq.Invoke(context);
-            }
-        }
-
-        private static void ExecuteRoutePreReq(NancyContext context, Func<NancyContext, Response> resolveResultPreReq)
-        {
-            if (resolveResultPreReq == null)
-            {
-                return;
-            }
-
-            var resolveResultPreReqResponse = resolveResultPreReq.Invoke(context);
-
-            if (resolveResultPreReqResponse != null)
-            {
-                context.Response = resolveResultPreReqResponse;
             }
         }
     }

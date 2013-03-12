@@ -3,7 +3,7 @@ namespace Nancy.Demo.SparkViewEngine
     public class MainModule : NancyModule
     {
         /// <summary>
-        /// Initializes a new instance of the <see cref="NancyModule"/> class.
+        /// Initializes a new instance of the <see cref="INancyModule"/> class.
         /// </summary>
         public MainModule()
         {
@@ -11,6 +11,10 @@ namespace Nancy.Demo.SparkViewEngine
                 {
                     return View["Index.spark"];
                 };
+
+           Get[ "/test" ] = _ => View[ "test" ];
+
+           Get[ "/test2" ] = _ => View[ "test2" ];
         }
     }
 }

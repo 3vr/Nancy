@@ -4,6 +4,7 @@
     using System.Collections.Generic;
     using System.Linq;
     using System.Text;
+    using System.Globalization;
 
     using Nancy.Bootstrapper;
     using ViewEngines;
@@ -31,7 +32,22 @@
         /// </summary>
         public IList<Func<string, dynamic, ViewLocationContext, string>> ViewLocationConventions { get; set; }
 
+        /// <summary>
+        /// Gets or sets the conventions for locating and serving static content
+        /// </summary>
         public IList<Func<NancyContext, string, Response>> StaticContentsConventions { get; set; }
+
+        /// <summary>
+        /// Gets or sets the conventions for coercing accept headers from their source
+        /// values to the real values for content negotiation
+        /// <seealso cref="BuiltInAcceptHeaderCoercions"/>
+        /// </summary>
+        public IList<Func<IEnumerable<Tuple<string, decimal>>, NancyContext, IEnumerable<Tuple<string, decimal>>>> AcceptHeaderCoercionConventions { get; set; }
+
+        /// <summary>
+        /// Gets or sets the conventions for determining request culture
+        /// </summary>
+        public IList<Func<NancyContext, CultureInfo>> CultureConventions { get; set; }
 
         /// <summary>
         /// Validates the conventions
@@ -61,6 +77,8 @@
             {
                 new InstanceRegistration(typeof(ViewLocationConventions), new ViewLocationConventions(this.ViewLocationConventions)),
                 new InstanceRegistration(typeof(StaticContentsConventions), new StaticContentsConventions(this.StaticContentsConventions)), 
+                new InstanceRegistration(typeof(AcceptHeaderCoercionConventions), new AcceptHeaderCoercionConventions(this.AcceptHeaderCoercionConventions)), 
+                new InstanceRegistration(typeof(CultureConventions), new CultureConventions(this.CultureConventions)), 
             };
         }
 
@@ -70,8 +88,11 @@
         /// </summary>
         private void BuildDefaultConventions()
         {
-            this.conventions = AppDomainAssemblyTypeScanner
-                .TypesOf<IConvention>()
+            var defaultConventions =
+                AppDomainAssemblyTypeScanner.TypesOf<IConvention>(ScanMode.OnlyNancy);
+                
+            this.conventions = defaultConventions
+                .Union(AppDomainAssemblyTypeScanner.TypesOf<IConvention>(ScanMode.ExcludeNancy))
                 .Select(t => (IConvention)Activator.CreateInstance(t));
 
             foreach (var convention in this.conventions)

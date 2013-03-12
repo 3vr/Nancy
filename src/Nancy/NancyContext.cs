@@ -1,17 +1,24 @@
-using Nancy.Security;
 
 namespace Nancy
 {
     using System;
     using System.Collections.Generic;
     using System.Linq;
-    using Diagnostics;
+    using Nancy.Diagnostics;
+    using Nancy.Responses.Negotiation;
+    using Nancy.Security;
+    using Nancy.Validation;
+    using System.Globalization;
 
     /// <summary>
     /// Nancy context.
     /// </summary>
     public sealed class NancyContext : IDisposable
     {
+        private Request request;
+
+        private ModelValidationResult modelValidationResult;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="NancyContext"/> class.
         /// </summary>
@@ -19,6 +26,7 @@ namespace Nancy
         {
             this.Items = new Dictionary<string, object>();
             this.Trace = new RequestTrace();
+            this.ViewBag = new DynamicDictionary();
             
             // TODO - potentially additional logic to lock to ip etc?
             this.ControlPanelEnabled = true;
@@ -33,8 +41,6 @@ namespace Nancy
         /// Gets or sets the parameters for the resolved route 
         /// </summary>
         public dynamic Parameters { get; set; }
-
-        private Request request;
 
         /// <summary>
         /// Gets or sets the incoming request
@@ -75,6 +81,30 @@ namespace Nancy
         public bool ControlPanelEnabled { get; private set; }
 
         /// <summary>
+        /// Non-model specific data for rendering in the response
+        /// </summary>
+        public dynamic ViewBag { get; private set; }
+
+        /// <summary>
+        /// Gets or sets the model validation result.
+        /// </summary>
+        public ModelValidationResult ModelValidationResult
+        {
+            get { return this.modelValidationResult ?? new ModelValidationResult(null); }
+            set { this.modelValidationResult = value; }
+        }
+
+        /// <summary>
+        /// Gets or sets the context's culture
+        /// </summary>
+        public CultureInfo Culture { get; set; }
+
+        /// <summary>
+        /// Context of content negotiation (if relevent)
+        /// </summary>
+        public NegotiationContext NegotiationContext { get; set; }
+
+        /// <summary>
         /// Disposes any disposable items in the <see cref="Items"/> dictionary.
         /// </summary>
         public void Dispose()
@@ -85,6 +115,16 @@ namespace Nancy
             }
 
             this.Items.Clear();
+
+            if (this.request != null)
+            {
+                ((IDisposable) this.request).Dispose();
+            }
+
+            if (this.Response != null)
+            {
+                this.Response.Dispose();
+            }
         }
     }
 }

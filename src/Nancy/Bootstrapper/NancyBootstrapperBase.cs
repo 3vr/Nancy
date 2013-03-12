@@ -26,9 +26,19 @@
         private bool initialised;
 
         /// <summary>
+        /// Stores the <see cref="IRootPathProvider"/> used by Nancy
+        /// </summary>
+        private IRootPathProvider rootPathProvider;
+
+        /// <summary>
         /// Default Nancy conventions
         /// </summary>
         private readonly NancyConventions conventions;
+
+        /// <summary>
+        /// Internal configuration
+        /// </summary>
+        private NancyInternalConfiguration internalConfiguration;
 
         /// <summary>
         /// Application pipelines.
@@ -43,17 +53,10 @@
         private ModuleRegistration[] modules;
 
         /// <summary>
-        /// Default favicon
-        /// </summary>
-        private byte[] defaultFavIcon;
-
-        /// <summary>
         /// Initializes a new instance of the <see cref="NancyBootstrapperBase{TContainer}"/> class.
         /// </summary>
         protected NancyBootstrapperBase()
         {
-            AppDomainAssemblyTypeScanner.LoadNancyAssemblies();
-
             this.ApplicationPipelines = new Pipelines();
             this.conventions = new NancyConventions();
         }
@@ -70,7 +73,7 @@
         {
             get
             {
-                return NancyInternalConfiguration.Default;
+                return this.internalConfiguration ?? (this.internalConfiguration = NancyInternalConfiguration.Default);
             }
         }
 
@@ -97,9 +100,9 @@
                     this.modules 
                     ?? 
                     (this.modules = AppDomainAssemblyTypeScanner
-                                        .TypesOf<NancyModule>(true)
+                                        .TypesOf<INancyModule>(true)
                                         .NotOfType<DiagnosticModule>()
-                                        .Select(t => new ModuleRegistration(t, this.GetModuleKeyGenerator().GetKeyForModuleType(t)))
+                                        .Select(t => new ModuleRegistration(t))
                                         .ToArray());
             }
         }
@@ -146,19 +149,27 @@
         }
 
         /// <summary>
-        /// Gets all startup tasks
+        /// Gets all application startup tasks
         /// </summary>
-        protected virtual IEnumerable<Type> StartupTasks
+        protected virtual IEnumerable<Type> ApplicationStartupTasks
         {
-            get { return AppDomainAssemblyTypeScanner.TypesOf<IStartup>(); }
+            get { return AppDomainAssemblyTypeScanner.TypesOf<IApplicationStartup>(); }
+        }
+
+        /// <summary>
+        /// Gets all application registration tasks
+        /// </summary>
+        protected virtual IEnumerable<Type> ApplicationRegistrationTasks
+        {
+            get { return AppDomainAssemblyTypeScanner.TypesOf<IApplicationRegistrations>(); }
         }
 
         /// <summary>
         /// Gets the root path provider
         /// </summary>
-        protected virtual Type RootPathProvider
+        protected virtual IRootPathProvider RootPathProvider
         {
-            get { return AppDomainAssemblyTypeScanner.TypesOf<IRootPathProvider>(true).FirstOrDefault() ?? typeof(DefaultRootPathProvider); }
+            get { return this.rootPathProvider ?? (this.rootPathProvider = GetRootPathProvider()); }
         }
 
         /// <summary>
@@ -167,15 +178,14 @@
         protected virtual IEnumerable<Type> ModelValidatorFactories
         {
             get { return AppDomainAssemblyTypeScanner.TypesOf<IModelValidatorFactory>(); }
-            //get { return new[] { typeof(DataAnnotationsValidatorFactory) }; }
         }
 
         /// <summary>
         /// Gets the default favicon
         /// </summary>
-        protected virtual byte[] DefaultFavIcon
+        protected virtual byte[] FavIcon
         {
-            get { return this.defaultFavIcon ?? (this.defaultFavIcon = LoadFavIcon()); }
+            get { return FavIconApplicationStartup.FavIcon; }
         }
 
         /// <summary>
@@ -212,6 +222,7 @@
             this.ApplicationContainer = this.GetApplicationContainer();
 
             this.RegisterBootstrapperTypes(this.ApplicationContainer);
+            
             this.ConfigureApplicationContainer(this.ApplicationContainer);
 
             var typeRegistrations = this.InternalConfiguration.GetTypeRegistations()
@@ -236,29 +247,41 @@
             this.RegisterModules(this.ApplicationContainer, this.Modules);
             this.RegisterInstances(this.ApplicationContainer, instanceRegistrations);
 
-            foreach (var startupTask in this.GetStartupTasks().ToList())
+            foreach (var applicationRegistrationTask in this.GetApplicationRegistrationTasks().ToList())
             {
-                startupTask.Initialize(this.ApplicationPipelines);
+                var applicationTypeRegistrations = 
+                    applicationRegistrationTask.TypeRegistrations;
 
-                if (startupTask.TypeRegistrations != null)
+                if (applicationTypeRegistrations != null)
                 {
-                    this.RegisterTypes(this.ApplicationContainer, startupTask.TypeRegistrations);
+                    this.RegisterTypes(this.ApplicationContainer, applicationTypeRegistrations);
                 }
 
-                if (startupTask.CollectionTypeRegistrations != null)
+                var applicationCollectionRegistrations =
+                    applicationRegistrationTask.CollectionTypeRegistrations;
+
+                if (applicationCollectionRegistrations != null)
                 {
-                    this.RegisterCollectionTypes(this.ApplicationContainer, startupTask.CollectionTypeRegistrations);
+                    this.RegisterCollectionTypes(this.ApplicationContainer, applicationCollectionRegistrations);
                 }
 
-                if (startupTask.InstanceRegistrations != null)
+                var applicationInstanceRegistrations =
+                    applicationRegistrationTask.InstanceRegistrations;
+
+                if (applicationInstanceRegistrations != null)
                 {
-                    this.RegisterInstances(this.ApplicationContainer, startupTask.InstanceRegistrations);
+                    this.RegisterInstances(this.ApplicationContainer, applicationInstanceRegistrations);
                 }
+            }
+
+            foreach (var applicationStartupTask in this.GetApplicationStartupTasks().ToList())
+            {
+                applicationStartupTask.Initialize(this.ApplicationPipelines);
             }
 
             this.ApplicationStartup(this.ApplicationContainer, this.ApplicationPipelines);
 
-            if (this.DefaultFavIcon != null)
+            if (this.FavIcon != null)
             {
                 this.ApplicationPipelines.BeforeRequest.AddItemToStartOfPipeline(ctx =>
                     {
@@ -273,7 +296,7 @@
                                 {
                                     ContentType = "image/vnd.microsoft.icon",
                                     StatusCode = HttpStatusCode.OK,
-                                    Contents = s => s.Write(this.DefaultFavIcon, 0, this.DefaultFavIcon.Length)
+                                    Contents = s => s.Write(this.FavIcon, 0, this.FavIcon.Length)
                                 };
 
                             response.Headers["Cache-Control"] = "public, max-age=604800, must-revalidate";
@@ -285,29 +308,43 @@
                     });
             }
 
+            this.GetDiagnostics().Initialize(this.ApplicationPipelines);
+
             this.initialised = true;
         }
 
         /// <summary>
-        /// Gets all registered startup tasks
+        /// Gets the diagnostics for intialisation
         /// </summary>
-        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IStartup"/> instances. </returns>
-        protected abstract IEnumerable<IStartup> GetStartupTasks();
+        /// <returns>IDiagnostics implementation</returns>
+        protected abstract IDiagnostics GetDiagnostics();
+
+        /// <summary>
+        /// Gets all registered application startup tasks
+        /// </summary>
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IApplicationStartup"/> instances.</returns>
+        protected abstract IEnumerable<IApplicationStartup> GetApplicationStartupTasks();
+
+        /// <summary>
+        /// Gets all registered application registration tasks
+        /// </summary>
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IApplicationRegistrations"/> instances.</returns>
+        protected abstract IEnumerable<IApplicationRegistrations> GetApplicationRegistrationTasks();
 
         /// <summary>
         /// Get all NancyModule implementation instances
         /// </summary>
         /// <param name="context">The current context</param>
-        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="NancyModule"/> instances.</returns>
-        public abstract IEnumerable<NancyModule> GetAllModules(NancyContext context);
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="INancyModule"/> instances.</returns>
+        public abstract IEnumerable<INancyModule> GetAllModules(NancyContext context);
 
         /// <summary>
-        /// Retrieves a specific <see cref="NancyModule"/> implementation based on its key
+        /// Retrieves a specific <see cref="INancyModule"/> implementation - should be per-request lifetime
         /// </summary>
-        /// <param name="moduleKey">Module key</param>
+        /// <param name="moduleType">Module type</param>
         /// <param name="context">The current context</param>
-        /// <returns>The <see cref="NancyModule"/> instance that was retrived by the <paramref name="moduleKey"/> parameter.</returns>
-        public abstract NancyModule GetModuleByKey(string moduleKey, NancyContext context);
+        /// <returns>The <see cref="INancyModule"/> instance</returns>
+        public abstract INancyModule GetModule(Type moduleType, NancyContext context);
 
         /// <summary>
         /// Gets the configured INancyEngine
@@ -320,7 +357,7 @@
                 throw new InvalidOperationException("Bootstrapper is not initialised. Call Initialise before GetEngine");
             }
 
-            var engine = this.GetEngineInternal();
+            var engine = this.SafeGetNancyEngineInstance();
 
             engine.RequestPipelinesFactory = this.InitializeRequestPipelines;
 
@@ -415,12 +452,6 @@
         protected abstract INancyEngine GetEngineInternal();
 
         /// <summary>
-        /// Get the moduleKey generator
-        /// </summary>
-        /// <returns>IModuleKeyGenerator instance</returns>
-        protected abstract IModuleKeyGenerator GetModuleKeyGenerator();
-
-        /// <summary>
         /// Gets the application level container
         /// </summary>
         /// <returns>Container instance</returns>
@@ -470,7 +501,7 @@
         /// <returns>Collection of TypeRegistration types</returns>
         private IEnumerable<TypeRegistration> GetAdditionalTypes()
         {
-            return new[] { new TypeRegistration(typeof(IRootPathProvider), this.RootPathProvider) };
+            return Enumerable.Empty<TypeRegistration>();
         }
 
         /// <summary>
@@ -484,6 +515,7 @@
                 new InstanceRegistration(typeof(CryptographyConfiguration), this.CryptographyConfiguration),
                 new InstanceRegistration(typeof(NancyInternalConfiguration), this.InternalConfiguration), 
                 new InstanceRegistration(typeof(DiagnosticsConfiguration), this.DiagnosticsConfiguration), 
+                new InstanceRegistration(typeof(IRootPathProvider), this.RootPathProvider), 
             };
         }
 
@@ -500,31 +532,39 @@
                     new CollectionTypeRegistration(typeof(IModelBinder), this.ModelBinders),
                     new CollectionTypeRegistration(typeof(ITypeConverter), this.TypeConverters),
                     new CollectionTypeRegistration(typeof(IBodyDeserializer), this.BodyDeserializers),
-                    new CollectionTypeRegistration(typeof(IStartup), this.StartupTasks), 
+                    new CollectionTypeRegistration(typeof(IApplicationStartup), this.ApplicationStartupTasks), 
+                    new CollectionTypeRegistration(typeof(IApplicationRegistrations), this.ApplicationRegistrationTasks), 
                     new CollectionTypeRegistration(typeof(IModelValidatorFactory), this.ModelValidatorFactories)
                 };
         }
 
-        /// <summary>
-        /// Loads the default favicon from the assembly
-        /// </summary>
-        /// <returns>Favicon byte array</returns>
-        private static byte[] LoadFavIcon()
+        private INancyEngine SafeGetNancyEngineInstance()
         {
-            var resourceStream = 
-                typeof(INancyEngine).Assembly.GetManifestResourceStream("Nancy.favicon.ico");
-
-            if (resourceStream == null)
+            try
             {
-                return null;
+                return this.GetEngineInternal();
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Something went wrong when trying to satisfy one of the dependencies during composition, make sure that you've registered all new dependencies in the container and inspect the innerexception for more details.",
+                    ex);
+            }
+        }
+
+
+        private static IRootPathProvider GetRootPathProvider()
+        {
+            var providerType = AppDomainAssemblyTypeScanner
+                .TypesOf<IRootPathProvider>(ScanMode.ExcludeNancy)
+                .SingleOrDefault();
+
+            if (providerType == null)
+            {
+                providerType = typeof(DefaultRootPathProvider);
             }
 
-            var result = 
-                new byte[resourceStream.Length];
-
-            resourceStream.Read(result, 0, (int)resourceStream.Length);
-
-            return result;
+            return Activator.CreateInstance(providerType) as IRootPathProvider;
         }
     }
 }

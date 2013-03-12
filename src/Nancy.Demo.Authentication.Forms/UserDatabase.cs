@@ -1,12 +1,10 @@
-using Nancy.Security;
-
 namespace Nancy.Demo.Authentication.Forms
 {
     using System;
     using System.Collections.Generic;
     using System.Linq;
-
     using Nancy.Authentication.Forms;
+    using Nancy.Security;
 
     public class UserDatabase : IUserMapper
     {
@@ -18,7 +16,7 @@ namespace Nancy.Demo.Authentication.Forms
             users.Add(new Tuple<string, string, Guid>("user", "password", new Guid("56E1E49E-B7E8-4EEA-8459-7A906AC4D4C0")));
         }
 
-        public IUserIdentity GetUserFromIdentifier(Guid identifier)
+        public IUserIdentity GetUserFromIdentifier(Guid identifier, NancyContext context)
         {
             var userRecord = users.Where(u => u.Item3 == identifier).FirstOrDefault();
 

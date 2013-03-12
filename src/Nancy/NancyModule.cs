@@ -4,18 +4,18 @@ namespace Nancy
     using System.Collections.Generic;
     using System.ComponentModel;
     using System.IO;
-    using ModelBinding;
+
+    using Nancy.ModelBinding;
+    using Nancy.Responses.Negotiation;
     using Nancy.Routing;
     using Nancy.Session;
-    using Nancy.ViewEngines;
-    using Nancy.Extensions;
     using Nancy.Validation;
+    using Nancy.ViewEngines;
 
     /// <summary>
-    /// Contains the functionality for defining routes and actions in Nancy. 
+    /// Basic class containing the functionality for defining routes and actions in Nancy. 
     /// </summary>
-    /// <value>This is the core type in the entire framework and changes to this class should not be very frequent because it represents a change to the core API of the framework.</value>
-    public abstract class NancyModule : IHideObjectMembers
+    public abstract class NancyModule : INancyModule, IHideObjectMembers
     {
         private readonly List<Route> routes;
 
@@ -23,7 +23,7 @@ namespace Nancy
         /// Initializes a new instance of the <see cref="NancyModule"/> class.
         /// </summary>
         protected NancyModule()
-            : this(string.Empty)
+            : this(String.Empty)
         {
         }
 
@@ -35,38 +35,22 @@ namespace Nancy
         {
             this.After = new AfterPipeline();
             this.Before = new BeforePipeline();
+            this.OnError = new ErrorPipeline();
+
             this.ModulePath = modulePath;
             this.routes = new List<Route>();
         }
 
         /// <summary>
-        /// <para>
-        /// The post-request hook
-        /// </para>
-        /// <para>
-        /// The post-request hook is called after the response is created by the route execution.
-        /// It can be used to rewrite the response or add/remove items from the context.
-        /// </para>
+        /// Non-model specific data for rendering in the response
         /// </summary>
-        public AfterPipeline After { get; protected set; }
-
-        /// <summary>
-        /// <para>
-        /// The pre-request hook
-        /// </para>
-        /// <para>
-        /// The PreRequest hook is called prior to executing a route. If any item in the
-        /// pre-request pipeline returns a response then the route is not executed and the
-        /// response is returned.
-        /// </para>
-        /// </summary>
-        public BeforePipeline Before { get; protected set; }
-
-        /// <summary>
-        /// Gets or sets the current Nancy context
-        /// </summary>
-        /// <value>A <see cref="NancyContext"/> instance.</value>
-        public NancyContext Context { get; set; }
+        public dynamic ViewBag
+        {
+            get
+            {
+                return this.Context == null ? null : this.Context.ViewBag;
+            }
+        }
 
         /// <summary>
         /// Gets <see cref="RouteBuilder"/> for declaring actions for DELETE requests.
@@ -86,13 +70,6 @@ namespace Nancy
         {
             get { return new RouteBuilder("GET", this); }
         }
-
-        /// <summary>
-        /// Get the root path of the routes in the current module.
-        /// </summary>
-        /// <value>A <see cref="string"/> containing the root path of the module or <see langword="null"/> if no root path should be used.</value>
-        /// <remarks>All routes will be relative to this root path.</remarks>
-        public string ModulePath { get; private set; }
 
         /// <summary>
         /// Gets <see cref="RouteBuilder"/> for declaring actions for OPTIONS requests.
@@ -131,30 +108,22 @@ namespace Nancy
         }
 
         /// <summary>
-        /// Gets or sets an <see cref="Request"/> instance that represents the current request.
-        /// </summary>
-        /// <value>An <see cref="Request"/> instance.</value>
-        public Request Request
-        {
-            get { return this.Context.Request; }
-            set { this.Context.Request = value; }
-        }
+        ///  Get the root path of the routes in the current module.
+        ///  </summary>
+        /// <value>
+        /// A <see cref="T:System.String" /> containing the root path of the module or <see langword="null" /> 
+        /// if no root path should be used.</value><remarks>All routes will be relative to this root path.
+        /// </remarks>
+        public string ModulePath { get; private set; }
 
         /// <summary>
         /// Gets all declared routes by the module.
         /// </summary>
         /// <value>A <see cref="IEnumerable{T}"/> instance, containing all <see cref="Route"/> instances declared by the module.</value>
-        public IEnumerable<Route> Routes
+        public virtual IEnumerable<Route> Routes
         {
             get { return this.routes.AsReadOnly(); }
         }
-
-        /// <summary>
-        /// An extension point for adding support for formatting response contents.
-        /// </summary>
-        /// <value>This property will always return <see langword="null" /> because it acts as an extension point.</value>
-        /// <remarks>Extension methods to this property should always return <see cref="Response"/> or one of the types that can implicitly be types into a <see cref="Response"/>.</remarks>
-        public IResponseFormatter Response { get; set; }
 
         /// <summary>
         /// Gets the current session.
@@ -173,25 +142,96 @@ namespace Nancy
             get { return new ViewRenderer(this); }
         }
 
-        /// <summary>
-        /// The extension point for accessing the view engines in Nancy.
-        /// </summary>
-        /// <value>An <see cref="IViewFactory"/> instance.</value>
-        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        public IViewFactory ViewFactory { get; set; }
+        public Negotiator Negotiate
+        {
+            get { return new Negotiator(this.Context); }
+        }
 
         /// <summary>
-        /// Gets or sets the model binder locator
+        ///  Gets or sets the validator locator.
+        ///  </summary>
+        public IModelValidatorLocator ValidatorLocator { get; set; }
+
+        /// <summary>
+        /// Gets or sets an <see cref="Request"/> instance that represents the current request.
         /// </summary>
-        [EditorBrowsable(EditorBrowsableState.Never)]
+        /// <value>An <see cref="Request"/> instance.</value>
+        public virtual Request Request
+        {
+            get { return this.Context.Request; }
+            set { this.Context.Request = value; }
+        }
+
+        /// <summary>
+        ///  The extension point for accessing the view engines in Nancy.
+        ///  </summary><value>An <see cref="T:Nancy.ViewEngines.IViewFactory" /> instance.</value>
+        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
+        public IViewFactory ViewFactory { get; set; }
+
+        /// <summary><para>
+        ///  The post-request hook
+        ///  </para><para>
+        ///  The post-request hook is called after the response is created by the route execution.
+        ///  It can be used to rewrite the response or add/remove items from the context.
+        ///  </para>
+        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
+        /// </summary>
+        public AfterPipeline After { get; set; }
+
+        /// <summary><para>
+        ///  The pre-request hook
+        ///  </para><para>
+        ///  The PreRequest hook is called prior to executing a route. If any item in the
+        ///  pre-request pipeline returns a response then the route is not executed and the
+        ///  response is returned.
+        ///  </para>
+        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
+        /// </summary>
+        public BeforePipeline Before { get; set; }
+
+        /// <summary><para>
+        ///  The error hook
+        ///  </para><para>
+        ///  The error hook is called if an exception is thrown at any time during executing
+        ///  the PreRequest hook, a route and the PostRequest hook. It can be used to set
+        ///  the response and/or finish any ongoing tasks (close database session, etc).
+        ///  </para>
+        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
+        /// </summary>
+        public ErrorPipeline OnError { get; set; }
+
+        /// <summary>
+        ///  Gets or sets the current Nancy context
+        ///  </summary>
+        /// <value>A <see cref="T:Nancy.NancyContext" /> instance.</value>
+        /// <remarks>This is automatically set by Nancy at runtime.</remarks>
+        public NancyContext Context { get; set; }
+
+        /// <summary>
+        ///  An extension point for adding support for formatting response contents.
+        ///  </summary><value>This property will always return <see langword="null" /> because it acts as an extension point.</value><remarks>Extension methods to this property should always return <see cref="P:Nancy.NancyModuleBase.Response" /> or one of the types that can implicitly be types into a <see cref="P:Nancy.NancyModuleBase.Response" />.</remarks>
+        public IResponseFormatter Response { get; set; }
+
+        /// <summary>
+        ///  Gets or sets the model binder locator
+        ///  </summary>
         public IModelBinderLocator ModelBinderLocator { get; set; }
 
         /// <summary>
-        /// Gets or sets the validator locator.
+        /// Gets or sets the model validation result
         /// </summary>
         [EditorBrowsable(EditorBrowsableState.Never)]
-        public IModelValidatorLocator ValidatorLocator { get; set; }
+        public virtual ModelValidationResult ModelValidationResult
+        {
+            get { return this.Context == null ? null : this.Context.ModelValidationResult; }
+            set
+            {
+                if (this.Context != null)
+                {
+                    this.Context.ModelValidationResult = value;                    
+                }
+            }
+        }
 
         /// <summary>
         /// Helper class for configuring a route handler in a module.
@@ -205,7 +245,7 @@ namespace Nancy
             /// Initializes a new instance of the <see cref="RouteBuilder"/> class.
             /// </summary>
             /// <param name="method">The HTTP request method that the route should be available for.</param>
-            /// <param name="parentModule">The <see cref="NancyModule"/> that the route is being configured for.</param>
+            /// <param name="parentModule">The <see cref="INancyModule"/> that the route is being configured for.</param>
             public RouteBuilder(string method, NancyModule parentModule)
             {
                 this.method = method;
@@ -216,7 +256,7 @@ namespace Nancy
             /// Defines a Nancy route for the specified <paramref name="path"/>.
             /// </summary>
             /// <value>A delegate that is used to invoke the route.</value>
-            public Func<dynamic, Response> this[string path]
+            public Func<dynamic, dynamic> this[string path]
             {
                 set { this.AddRoute(path, null, value); }
             }
@@ -225,14 +265,14 @@ namespace Nancy
             /// Defines a Nancy route for the specified <paramref name="path"/> and <paramref name="condition"/>.
             /// </summary>
             /// <value>A delegate that is used to invoke the route.</value>
-            public Func<dynamic, Response> this[string path, Func<NancyContext, bool> condition]
+            public Func<dynamic, dynamic> this[string path, Func<NancyContext, bool> condition]
             {
                 set { this.AddRoute(path, condition, value); }
             }
 
-            private void AddRoute(string path, Func<NancyContext, bool> condition, Func<object, Response> value)
+            protected void AddRoute(string path, Func<NancyContext, bool> condition, Func<dynamic, dynamic> value)
             {
-                var fullPath = string.Concat(this.parentModule.ModulePath, path);
+                var fullPath = String.Concat(this.parentModule.ModulePath, path);
 
                 this.parentModule.routes.Add(new Route(this.method, fullPath, condition, value));
             }
@@ -243,13 +283,13 @@ namespace Nancy
         /// </summary>
         public class ViewRenderer : IHideObjectMembers
         {
-            private readonly NancyModule module;
+            private readonly INancyModule module;
 
             /// <summary>
             /// Initializes a new instance of the <see cref="ViewRenderer"/> class.
             /// </summary>
-            /// <param name="module">The <see cref="NancyModule"/> instance that is rendering the view.</param>
-            public ViewRenderer(NancyModule module)
+            /// <param name="module">The <see cref="INancyModule"/> instance that is rendering the view.</param>
+            public ViewRenderer(INancyModule module)
             {
                 this.module = module;
             }
@@ -260,9 +300,9 @@ namespace Nancy
             /// <param name="model">The model that should be passed into the view.</param>
             /// <returns>A delegate that can be invoked with the <see cref="Stream"/> that the view should be rendered to.</returns>
             /// <remarks>The view name is model.GetType().Name with any Model suffix removed.</remarks>
-            public Response this[dynamic model]
+            public Negotiator this[dynamic model]
             {
-                get { return this.module.ViewFactory.RenderView(null, model, this.GetViewLocationContext()); }
+                get { return this.GetNegotiator(null, model); }
             }
 
             /// <summary>
@@ -271,9 +311,9 @@ namespace Nancy
             /// <param name="viewName">The name of the view to render.</param>
             /// <returns>A delegate that can be invoked with the <see cref="Stream"/> that the view should be rendered to.</returns>
             /// <remarks>The extension in the view name is optional. If it is omitted, then Nancy will try to resolve which of the available engines that should be used to render the view.</remarks>
-            public Response this[string viewName]
+            public Negotiator this[string viewName]
             {
-                get { return this.module.ViewFactory.RenderView(viewName, null, this.GetViewLocationContext()); }
+                get { return this.GetNegotiator(viewName, null); }
             }
 
             /// <summary>
@@ -283,19 +323,21 @@ namespace Nancy
             /// <param name="model">The model that should be passed into the view.</param>
             /// <returns>A delegate that can be invoked with the <see cref="Stream"/> that the view should be rendered to.</returns>
             /// <remarks>The extension in the view name is optional. If it is omitted, then Nancy will try to resolve which of the available engines that should be used to render the view.</remarks>
-            public Response this[string viewName, dynamic model]
+            public Negotiator this[string viewName, dynamic model]
             {
-                get { return this.module.ViewFactory.RenderView(viewName, model, this.GetViewLocationContext()); }
+                get { return this.GetNegotiator(viewName, model); }
             }
 
-            private ViewLocationContext GetViewLocationContext()
+            private Negotiator GetNegotiator(string viewName, object model)
             {
-                return new ViewLocationContext
-                       {
-                           ModulePath = module.ModulePath,
-                           ModuleName = module.GetModuleName(),
-                           Context = module.Context
-                       };
+                var negotiationContext = this.module.Context.NegotiationContext;
+
+                negotiationContext.ViewName = viewName;
+                negotiationContext.DefaultModel = model;
+                negotiationContext.PermissableMediaRanges.Clear();
+                negotiationContext.PermissableMediaRanges.Add("text/html");
+
+                return new Negotiator(this.module.Context);
             }
         }
     }

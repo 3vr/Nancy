@@ -5,6 +5,11 @@
     /// </summary>
     public class NonEncodedHtmlString : IHtmlString
     {
+        /// <summary>
+        /// Represents the empty <see cref="NonEncodedHtmlString"/>. This field is readonly.
+        /// </summary>
+        public static readonly NonEncodedHtmlString Empty = new NonEncodedHtmlString(string.Empty);
+
         private readonly string value;
 
         /// <summary>
@@ -23,6 +28,11 @@
         public string ToHtmlString()
         {
             return value;
+        }
+
+        public static implicit operator NonEncodedHtmlString(string value)
+        {
+            return new NonEncodedHtmlString(value);
         }
     }
 }

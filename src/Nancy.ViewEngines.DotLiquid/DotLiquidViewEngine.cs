@@ -1,33 +1,38 @@
 ﻿namespace Nancy.ViewEngines.DotLiquid
 {
+    using Responses;
     using System;
     using System.Collections.Generic;
+    using System.Dynamic;
     using System.IO;
-    using Responses;
     using global::DotLiquid;
     using global::DotLiquid.FileSystems;
+    using global::DotLiquid.NamingConventions;
+    using global::DotLiquid.Exceptions;
 
+    /// <summary>
+    /// View engine for rendering dotLiquid views.
+    /// </summary>
     public class DotLiquidViewEngine : IViewEngine
     {
+        private readonly IFileSystemFactory fileSystemFactory;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="DotLiquidViewEngine"/> class.
         /// </summary>
+        /// <remarks>The instance will use the <see cref="DefaultFileSystemFactory"/> internally.</remarks>
         public DotLiquidViewEngine()
-            : this(new LiquidNancyFileSystem(string.Empty))
+            : this(new DefaultFileSystemFactory())
         {
         }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DotLiquidViewEngine"/> class.
         /// </summary>
-        /// <param name="fileSystem"></param>
-        public DotLiquidViewEngine(IFileSystem fileSystem)
+        /// <param name="fileSystemFactory">Factory used to retrieve the <see cref="IFileSystem"/> instance that should be used by the engine.</param>
+        public DotLiquidViewEngine(IFileSystemFactory fileSystemFactory)
         {
-            if (fileSystem != null)
-            {
-                // TODO - Wrap around Nancy view locator / cache??
-                Template.FileSystem = fileSystem;
-            }
+            this.fileSystemFactory = fileSystemFactory;
         }
 
         /// <summary>
@@ -40,8 +45,14 @@
             get { yield return "liquid"; }
         }
 
+        /// <summary>
+        /// Initialise the view engine (if necessary)
+        /// </summary>
+        /// <param name="viewEngineStartupContext">Startup context</param>
         public void Initialize(ViewEngineStartupContext viewEngineStartupContext)
         {
+            Template.FileSystem = this.fileSystemFactory.GetFileSystem(viewEngineStartupContext, this.Extensions);
+            Template.NamingConvention = new CSharpNamingConvention();
         }
 
         /// <summary>
@@ -53,22 +64,98 @@
         /// <returns>A response</returns>
         public Response RenderView(ViewLocationResult viewLocationResult, dynamic model, IRenderContext renderContext)
         {
-            return new HtmlResponse(contents: stream =>
-            {
-                var hashedModel =
-                    Hash.FromAnonymousObject(new { model = new DynamicDrop(model) });
+            Template parsed;
+            Hash hashedModel;
+            HttpStatusCode status;
 
-                var parsed = renderContext.ViewCache.GetOrAdd(
+            try
+            {
+                // Set the parsed template
+                parsed = renderContext.ViewCache.GetOrAdd(
                     viewLocationResult,
                     x => Template.Parse(viewLocationResult.Contents.Invoke().ReadToEnd()));
 
-                var rendered = parsed.Render(hashedModel);
+                hashedModel = Hash.FromAnonymousObject(new
+                {
+                    Model = new DynamicDrop(model),
+                    ViewBag = new DynamicDrop(renderContext.Context.ViewBag)
+                });
 
-                var writer = new StreamWriter(stream);
+                // If we got past that, we have a good response
+                status = HttpStatusCode.OK;
 
-                writer.Write(rendered);
-                writer.Flush();
+            }
+            catch (SyntaxException syntaxException)
+            {
+                // Syntax Exceptions cause a 500
+                status = HttpStatusCode.InternalServerError;
+
+                // Build the error message
+                String errorMessage = String.Format("Syntax error in liquid view '{0}':\r\n\r\n{1}",
+                    String.Format("{0}/{1}.{2}", viewLocationResult.Location, viewLocationResult.Name, viewLocationResult.Extension),
+                    syntaxException.Message);
+
+                // Create the error model with a Nancy DynamicDictionary because i can ;)
+                DynamicDictionary errorModel = new DynamicDictionary();
+                errorModel.Add(new KeyValuePair<string, dynamic>("ErrorMessage", errorMessage));
+
+                // Hash up the Error model so DotLiquid will understand it
+                hashedModel =
+                    Hash.FromAnonymousObject(new
+                    {
+                        Model = new DynamicDrop(errorModel)
+                    });
+
+                // Grab the error HTML from the embedded resource and build up the DotLiquid template.
+                String errorHtml = LoadResource(@"500.liquid");
+                parsed = Template.Parse(errorHtml);
+            }
+            catch (Exception ex)
+            {
+                status = HttpStatusCode.InternalServerError;
+                // Build the error message
+                String errorMessage = String.Format("Error: {0}", ex.Message);
+
+                // Create the error model with a Nancy DynamicDictionary because i can ;)
+                DynamicDictionary errorModel = new DynamicDictionary();
+                errorModel.Add(new KeyValuePair<string, dynamic>("ErrorMessage", errorMessage));
+
+                // Hash up the Error model so DotLiquid will understand it
+                hashedModel =
+                    Hash.FromAnonymousObject(new
+                    {
+                        Model = new DynamicDrop(errorModel)
+                    });
+
+                // Grab the error HTML from the embedded resource
+                String errorHtml = LoadResource(@"500.liquid");
+                parsed = Template.Parse(errorHtml);
+            }
+
+            // Build the response
+            return new HtmlResponse(statusCode: status, contents: stream =>
+            {
+                parsed.Render(stream, new RenderParameters
+                {
+                    LocalVariables = hashedModel,
+                    Registers = Hash.FromAnonymousObject(new { nancy = renderContext })
+                });
             });
+        }
+
+        private static string LoadResource(string filename)
+        {
+            var resourceStream = typeof(DotLiquidViewEngine).Assembly.GetManifestResourceStream(String.Format("Nancy.ViewEngines.DotLiquid.Resources.{0}", filename));
+
+            if (resourceStream == null)
+            {
+                return string.Empty;
+            }
+
+            using (var reader = new StreamReader(resourceStream))
+            {
+                return reader.ReadToEnd();
+            }
         }
     }
 }

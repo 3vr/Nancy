@@ -31,6 +31,7 @@ namespace Nancy
         public IEnumerable<Tuple<string, decimal>> Accept
         {
             get { return GetWeightedValues("Accept").ToList(); }
+            set { this.SetHeaderValues("Accept", value, GetWeightedValuesAsStrings); }
         }
 
         /// <summary>
@@ -40,6 +41,7 @@ namespace Nancy
         public IEnumerable<Tuple<string, decimal>> AcceptCharset
         {
             get { return this.GetWeightedValues("Accept-Charset"); }
+            set { this.SetHeaderValues("Accept-Charset", value, GetWeightedValuesAsStrings); }
         }
 
         /// <summary>
@@ -49,6 +51,7 @@ namespace Nancy
         public IEnumerable<string> AcceptEncoding
         {
             get { return this.GetSplitValues("Accept-Encoding"); }
+            set { this.SetHeaderValues("Accept-Encoding", value, x => x); }
         }
 
         /// <summary>
@@ -58,6 +61,7 @@ namespace Nancy
         public IEnumerable<Tuple<string, decimal>> AcceptLanguage
         {
             get { return this.GetWeightedValues("Accept-Language"); }
+            set { this.SetHeaderValues("Accept-Language", value, GetWeightedValuesAsStrings); }
         }
 
         /// <summary>
@@ -67,6 +71,7 @@ namespace Nancy
         public string Authorization
         {
             get { return this.GetValue("Authorization", x => x.First()); }
+            set { this.SetHeaderValues("Authorization", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -76,8 +81,9 @@ namespace Nancy
         public IEnumerable<string> CacheControl
         {
             get { return this.GetValue("Cache-Control"); }
+            set { this.SetHeaderValues("Cache-Control", value, x => x); }
         }
-        
+
         /// <summary>
         /// Contains name/value pairs of information stored for that URL.
         /// </summary>
@@ -94,6 +100,7 @@ namespace Nancy
         public string Connection
         {
             get { return this.GetValue("Connection", x => x.First()); }
+            set { this.SetHeaderValues("Connection", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -103,6 +110,7 @@ namespace Nancy
         public long ContentLength
         {
             get { return this.GetValue("Content-Length", x => Convert.ToInt64(x.First())); }
+            set { this.SetHeaderValues("Content-Length", value, x => new[] { x.ToString(CultureInfo.InvariantCulture) }); }
         }
 
         /// <summary>
@@ -112,6 +120,7 @@ namespace Nancy
         public string ContentType
         {
             get { return this.GetValue("Content-Type", x => x.First()); }
+            set { this.SetHeaderValues("Content-Type", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -121,6 +130,7 @@ namespace Nancy
         public DateTime? Date
         {
             get { return this.GetValue("Date", x => ParseDateTime(x.First())); }
+            set { this.SetHeaderValues("Date", value, x => new[] { GetDateAsString(value) }); }
         }
 
         /// <summary>
@@ -130,6 +140,7 @@ namespace Nancy
         public string Host
         {
             get { return this.GetValue("Host", x => x.First()); }
+            set { this.SetHeaderValues("Host", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -139,6 +150,7 @@ namespace Nancy
         public IEnumerable<string> IfMatch
         {
             get { return this.GetValue("If-Match"); }
+            set { this.SetHeaderValues("If-Match", value, x => x); }
         }
 
         /// <summary>
@@ -148,6 +160,7 @@ namespace Nancy
         public DateTime? IfModifiedSince
         {
             get { return this.GetValue("If-Modified-Since", x => ParseDateTime(x.First())); }
+            set { this.SetHeaderValues("If-Modified-Since", value, x => new[] { GetDateAsString(value) }); }
         }
 
         /// <summary>
@@ -157,6 +170,7 @@ namespace Nancy
         public IEnumerable<string> IfNoneMatch
         {
             get { return this.GetValue("If-None-Match"); }
+            set { this.SetHeaderValues("If-None-Match", value, x => x); }
         }
 
         /// <summary>
@@ -166,6 +180,7 @@ namespace Nancy
         public string IfRange
         {
             get { return this.GetValue("If-Range", x => x.First()); }
+            set { this.SetHeaderValues("If-Range", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -175,6 +190,8 @@ namespace Nancy
         public DateTime? IfUnmodifiedSince
         {
             get { return this.GetValue("If-Unmodified-Since", x => ParseDateTime(x.First())); }
+            set { this.SetHeaderValues("If-Unmodified-Since", value, x => new[] { GetDateAsString(value) }); }
+
         }
 
         /// <summary>
@@ -193,6 +210,7 @@ namespace Nancy
         public int MaxForwards
         {
             get { return this.GetValue("Max-Forwards", x => Convert.ToInt32(x.First())); }
+            set { this.SetHeaderValues("Max-Forwards", value, x => new[] { x.ToString(CultureInfo.InvariantCulture) }); }
         }
 
         /// <summary>
@@ -202,6 +220,7 @@ namespace Nancy
         public string Referrer
         {
             get { return this.GetValue("Referer", x => x.First()); }
+            set { this.SetHeaderValues("Referer", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -211,6 +230,7 @@ namespace Nancy
         public string UserAgent
         {
             get { return this.GetValue("User-Agent", x => x.First()); }
+            set { this.SetHeaderValues("User-Agent", value, x => new[] { x }); }
         }
 
         /// <summary>
@@ -239,7 +259,7 @@ namespace Nancy
         {
             return GetEnumerator();
         }
-        
+
         /// <summary>
         /// Gets the values for the header identified by the <paramref name="name"/> parameter.
         /// </summary>
@@ -255,12 +275,17 @@ namespace Nancy
             }
         }
 
+        private static string GetDateAsString(DateTime? value)
+        {
+            return !value.HasValue ? null : value.Value.ToString("R", CultureInfo.InvariantCulture);
+        }
+
         private IEnumerable<string> GetSplitValues(string header)
         {
             var values = this.GetValue(header);
 
             return values
-                .SelectMany(x => x.Split(new [] {','}, StringSplitOptions.RemoveEmptyEntries))
+                .SelectMany(x => x.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                 .Select(x => x.Trim())
                 .ToList();
         }
@@ -269,24 +294,32 @@ namespace Nancy
         {
             var values = this.GetSplitValues(headerName);
 
-            var parsed = values.Select(x => {
-                var q = x.Split(new[] {";q="}, StringSplitOptions.RemoveEmptyEntries);
-
+            var parsed = values.Select(x =>
+            {
+                var sections = x.Split(new[] { ";" }, StringSplitOptions.RemoveEmptyEntries);
+                var mediaRange = sections[0].Trim();
                 var quality = 1m;
-                if (q.Length > 1)
+
+                for (var index = 1; index < sections.Length; index++)
                 {
-                    if(!decimal.TryParse(q[1], NumberStyles.Float, CultureInfo.InvariantCulture, out quality))
+                    var trimmedValue = sections[index].Trim();
+                    if (trimmedValue.StartsWith("q=", StringComparison.OrdinalIgnoreCase))
                     {
-                        return null;
+                        decimal temp;
+                        var stringValue = trimmedValue.Substring(2);
+                        if (decimal.TryParse(stringValue, NumberStyles.Number, CultureInfo.InvariantCulture, out temp))
+                        {
+                            quality = temp;
+                            break;
+                        }
                     }
                 }
 
-                return new Tuple<string, decimal>(q[0].Trim(), quality);
+                return new Tuple<string, decimal>(mediaRange, quality);
             });
 
             return parsed
-                .Where(x => x != null)
-                .OrderByDescending(x => x.Item2);
+                    .OrderByDescending(x => x.Item2);
         }
 
         private static object GetDefaultValue(Type T)
@@ -310,7 +343,7 @@ namespace Nancy
 
         private static IEnumerable<INancyCookie> GetNancyCookies(IEnumerable<string> cookies)
         {
-            if(cookies == null)
+            if (cookies == null)
             {
                 return Enumerable.Empty<INancyCookie>();
             }
@@ -333,13 +366,17 @@ namespace Nancy
             }
 
             return converter.Invoke(this.headers[name]);
-        } 
+        }
+
+        private static IEnumerable<string> GetWeightedValuesAsStrings(IEnumerable<Tuple<string, decimal>> values)
+        {
+            return values.Select(x => string.Concat(x.Item1, ";q=", x.Item2.ToString(CultureInfo.InvariantCulture)));
+        }
 
         private static bool IsGenericEnumerable(Type T)
         {
             return !(T == typeof(string)) && T.IsGenericType && T.GetGenericTypeDefinition() == typeof(IEnumerable<>);
         }
-
 
         private static DateTime? ParseDateTime(string value)
         {
@@ -350,6 +387,21 @@ namespace Nancy
                 return result;
             }
             return null;
+        }
+
+        private void SetHeaderValues<T>(string header, T value, Func<T, IEnumerable<string>> valueTransformer)
+        {
+            if (EqualityComparer<T>.Default.Equals(value, default(T)))
+            {
+                if (this.headers.ContainsKey(header))
+                {
+                    this.headers.Remove(header);
+                }
+            }
+            else
+            {
+                this.headers[header] = valueTransformer.Invoke(value);
+            }
         }
     }
 }

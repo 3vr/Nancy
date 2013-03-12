@@ -1,6 +1,10 @@
 namespace Nancy.Diagnostics
 {
     using System.IO;
+
+    using Nancy.Localization;
+
+    using Responses;
     using Security;
     using ViewEngines;
     using ViewEngines.SuperSimpleViewEngine;
@@ -40,7 +44,7 @@ namespace Nancy.Diagnostics
             context.Items.Add(CsrfToken.DEFAULT_CSRF_KEY, "DIAGNOSTICSTOKEN");
 
             var renderContext = 
-                new DefaultRenderContext(ViewResolver, cache, new ViewLocationContext() { Context = context });
+                new DefaultRenderContext(ViewResolver, cache, new DummyTextResource(), new ViewLocationContext() { Context = context });
 
             return Engine.RenderView(location, model, renderContext);
         }
@@ -81,6 +85,17 @@ namespace Nancy.Diagnostics
                 var stream = GetBodyStream(fullName);
 
                 return GetViewLocationResult(fullName, stream);
+            }
+        }
+
+        internal class DummyTextResource : ITextResource
+        {
+            public string this[string key, NancyContext context]
+            {
+                get
+                {
+                    return string.Empty;
+                }
             }
         }
     }

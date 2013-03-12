@@ -1,9 +1,12 @@
 ﻿namespace Nancy.Tests.Unit
 {
     using System.Linq;
+    using System.CodeDom.Compiler;
+    using Microsoft.CSharp;
 
     using Nancy.Tests.Fakes;
-
+    using Nancy.TinyIoc;
+    
     using Xunit;
 
     public class DefaultNancyBootstrapperFixture
@@ -53,6 +56,32 @@
 
             this.bootstrapper.RequestStartupLastRequest.ShouldNotBeNull();
             this.bootstrapper.RequestStartupLastRequest.ShouldBeSameAs(request);
+        }
+
+        [Fact]
+        public void Container_should_ignore_specified_assemblies()
+        {
+            var ass = CSharpCodeProvider
+                .CreateProvider("CSharp")
+                .CompileAssemblyFromSource(
+                    new CompilerParameters
+                    {
+                        GenerateInMemory = true,
+                        GenerateExecutable = false,
+                        IncludeDebugInformation = false,
+                        OutputAssembly = "TestAssembly.dll"
+                    },
+                    new[]
+                    {
+                        "public interface IWillNotBeResolved { int i { get; set; } }",
+                        "public class WillNotBeResolved : IWillNotBeResolved { public int i { get; set; } }"
+                    })
+                .CompiledAssembly;
+
+            this.bootstrapper.Initialise ();
+            Assert.Throws<TinyIoCResolutionException>(
+                () => this.bootstrapper.Container.Resolve(ass.GetType("IWillNotBeResolved")));
+            
         }
     }
 }

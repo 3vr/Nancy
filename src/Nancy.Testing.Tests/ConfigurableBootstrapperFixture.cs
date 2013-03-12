@@ -91,7 +91,7 @@
         {
             // Given
             var availableMembers =
-                typeof(ConfigurableBootstrapper.ConfigurableBoostrapperConfigurator)
+                typeof(ConfigurableBootstrapper.ConfigurableBootstrapperConfigurator)
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance)
                 .Select(x => x.Name)
                 .Distinct();
@@ -127,12 +127,56 @@
             result.ToString().ShouldContain("Oh noes!");
         }
 
+        [Fact]
+        public void Should_run_application_startup_closure()
+        {
+            var date = new DateTime(2112,10,31);
+
+            var bootstrapper = new ConfigurableBootstrapper(with => 
+            {
+                with.ApplicationStartup((container, pipelines) =>
+                {
+                    pipelines.BeforeRequest += ctx =>
+                        {
+                            ctx.Items.Add("date", date);
+                            return null;
+                        };
+                });
+            });
+
+            bootstrapper.Initialise();
+
+            var engine = bootstrapper.GetEngine();
+            var request = new Request("GET", "/", "http");
+            var result = engine.HandleRequest(request);
+
+            result.Items["date"].ShouldEqual(date);
+        }
+
+        [Fact]
+        public void Should_run_request_startup_closure()
+        {
+            var date = new DateTime(2112, 10, 31);
+            var bootstrapper =
+                new ConfigurableBootstrapper(
+                    with => with.RequestStartup((container, pipelines, context) => 
+                        context.Items.Add("date", date)));
+
+            bootstrapper.Initialise();
+
+            var engine = bootstrapper.GetEngine();
+            var request = new Request("GET", "/", "http");
+            var result = engine.HandleRequest(request);
+
+            result.Items["date"].ShouldEqual(date);
+        }
+
         public IEnumerable<string> GetConfigurableBootstrapperMembers()
         {
             var ignoreList = new[]
             {
                 "AfterRequest", "BeforeRequest", "IsValid", "ModuleKeyGenerator",
-                "BindingDefaults", "OnError", "InteractiveDiagnosticProviders", "RequestTracing"
+                "BindingDefaults", "OnError", "InteractiveDiagnosticProviders", "RequestTracing", "IgnoredAssemblies"
             };
 
             var typesToReflect =
@@ -160,6 +204,11 @@
             }
 
             public void HandleRequest(Request request, Action<NancyContext> onComplete, Action<Exception> onError)
+            {
+                throw new NotImplementedException();
+            }
+
+            public void HandleRequest(Request request, Func<NancyContext, NancyContext> preRequest, Action<NancyContext> onComplete, Action<Exception> onError)
             {
                 throw new NotImplementedException();
             }

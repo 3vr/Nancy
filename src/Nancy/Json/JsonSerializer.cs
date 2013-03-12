@@ -38,9 +38,9 @@ namespace Nancy.Json
     
     internal sealed class JsonSerializer
 	{
-		internal static readonly long InitialJavaScriptDateTicks = new DateTime (1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
-                static readonly DateTime MinimumJavaScriptDate = new DateTime (100, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-		static readonly MethodInfo serializeGenericDictionary = typeof (JsonSerializer).GetMethod ("SerializeGenericDictionary", BindingFlags.NonPublic | BindingFlags.Instance);
+        internal static readonly long InitialJavaScriptDateTicks = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        static readonly DateTime MinimumJavaScriptDate = new DateTime(100, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        static readonly MethodInfo serializeGenericDictionary = typeof(JsonSerializer).GetMethod("SerializeGenericDictionary", BindingFlags.NonPublic | BindingFlags.Instance);
 
 		Dictionary <object, bool> objectCache;
 		JavaScriptSerializer serializer;
@@ -188,6 +188,13 @@ namespace Nancy.Json
 
 			if (typeof (Guid).IsAssignableFrom (valueType)) {
 				WriteValue (output, (Guid)obj);
+				return;
+			}
+
+			if (typeof (DynamicDictionaryValue).IsAssignableFrom(valueType))
+			{
+				var o = (DynamicDictionaryValue) obj;
+				SerializeValue(o.Value, output);
 				return;
 			}
 			
@@ -462,18 +469,32 @@ namespace Nancy.Json
 		{
 			WriteValue (output, value.GetComponents (UriComponents.AbsoluteUri, UriFormat.UriEscaped));
 		}
-		
+
 		void WriteValue (StringBuilder output, DateTime value)
 		{
-			value = value.ToUniversalTime ();
+            DateTime time = value.ToUniversalTime();
 
-			if (value < MinimumJavaScriptDate)
-				value = MinimumJavaScriptDate;
+            string suffix = "";
+            if (value.Kind != DateTimeKind.Utc) {
+                TimeSpan localTZOffset;
+                if (value > time) {
+                    localTZOffset = value - time;
+                    suffix = "+";
+                }
+                else {
+                    localTZOffset = time - value;
+                    suffix = "-";
+                }
+                suffix += localTZOffset.ToString("hhmm");
+            }
 
-			long ticks = (value.Ticks - InitialJavaScriptDateTicks) / (long)10000;
-			StringBuilderExtensions.AppendCount (output, maxJsonLength, "\"\\/Date(" + ticks + ")\\/\"");
+            if (time < MinimumJavaScriptDate)
+                time = MinimumJavaScriptDate;
+
+            long ticks = (time.Ticks - InitialJavaScriptDateTicks) / (long)10000;
+            StringBuilderExtensions.AppendCount(output, maxJsonLength, "\"\\/Date(" + ticks + suffix + ")\\/\"");
 		}
-		
+
 		void WriteValue (StringBuilder output, IConvertible value)
 		{
 			StringBuilderExtensions.AppendCount (output, maxJsonLength, value.ToString (CultureInfo.InvariantCulture));
@@ -493,7 +514,7 @@ namespace Nancy.Json
 			
 			WriteValue (output, value.ToString ());
 		}
-		
+
 		void WriteValue (StringBuilder output, string value)
 		{
 			if (String.IsNullOrEmpty (value)) {

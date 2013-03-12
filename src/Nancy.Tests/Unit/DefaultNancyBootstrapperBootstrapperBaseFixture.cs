@@ -3,7 +3,7 @@ namespace Nancy.Tests.Unit
 {
     using Nancy.Bootstrapper;
     using Bootstrapper.Base;
-    using TinyIoC;
+    using Nancy.TinyIoc;
 
     public class DefaultNancyBootstrapperBootstrapperBaseFixture : BootstrapperBaseFixtureBase<TinyIoCContainer>
     {
@@ -21,7 +21,7 @@ namespace Nancy.Tests.Unit
 
         public class FakeBootstrapper : DefaultNancyBootstrapper
         {
-            private NancyInternalConfiguration configuration;
+            private readonly NancyInternalConfiguration configuration;
 
             protected override NancyInternalConfiguration InternalConfiguration
             {

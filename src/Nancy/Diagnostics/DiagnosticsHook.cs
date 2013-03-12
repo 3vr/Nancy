@@ -9,31 +9,31 @@ namespace Nancy.Diagnostics
     using Cryptography;
     using Helpers;
     using ModelBinding;
+
+    using Nancy.Routing.Trie;
+
+    using Responses;
+    using Responses.Negotiation;
     using Routing;
+    using Nancy.Culture;
 
     public static class DiagnosticsHook
     {
-        internal const string ControlPanelPrefix = "/_Nancy";
-
-        internal const string ResourcePrefix = ControlPanelPrefix + "/Resources/";
-        
         private const string PipelineKey = "__Diagnostics";
 
-        private const string DiagsCookieName = "__ncd";
-        private const int DiagnosticsSessionTimeoutMinutes = 15;
+        internal const string ItemsKey = "DIAGS_REQUEST";
 
-        public static void Enable(DiagnosticsConfiguration diagnosticsConfiguration, IPipelines pipelines, IEnumerable<IDiagnosticsProvider> providers, IRootPathProvider rootPathProvider, IEnumerable<ISerializer> serializers, IRequestTracing requestTracing, NancyInternalConfiguration configuration, IModelBinderLocator modelBinderLocator)
+        public static void Enable(DiagnosticsConfiguration diagnosticsConfiguration, IPipelines pipelines, IEnumerable<IDiagnosticsProvider> providers, IRootPathProvider rootPathProvider, IEnumerable<ISerializer> serializers, IRequestTracing requestTracing, NancyInternalConfiguration configuration, IModelBinderLocator modelBinderLocator, IEnumerable<IResponseProcessor> responseProcessors, ICultureService cultureService)
         {
-            var keyGenerator = new DefaultModuleKeyGenerator();
-            var diagnosticsModuleCatalog = new DiagnosticsModuleCatalog(keyGenerator, providers, rootPathProvider, requestTracing, configuration, diagnosticsConfiguration);
+            var diagnosticsModuleCatalog = new DiagnosticsModuleCatalog(providers, rootPathProvider, requestTracing, configuration, diagnosticsConfiguration);
 
-            var diagnosticsRouteCache = new RouteCache(diagnosticsModuleCatalog, keyGenerator, new DefaultNancyContextFactory());
+            var diagnosticsRouteCache = new RouteCache(diagnosticsModuleCatalog, new DefaultNancyContextFactory(cultureService), new DefaultRouteSegmentExtractor(), new DefaultRouteDescriptionProvider(), cultureService);
 
             var diagnosticsRouteResolver = new DefaultRouteResolver(
                 diagnosticsModuleCatalog,
-                new DefaultRoutePatternMatcher(),
                 new DiagnosticsModuleBuilder(rootPathProvider, serializers, modelBinderLocator),
-                diagnosticsRouteCache);
+                diagnosticsRouteCache,
+                new RouteResolverTrie(new TrieNodeFactory()));
 
             var serializer = new DefaultObjectSerializer();
 
@@ -47,19 +47,24 @@ namespace Nancy.Diagnostics
                             return null;
                         }
 
-                        if (!ctx.Request.Path.StartsWith(ControlPanelPrefix, StringComparison.OrdinalIgnoreCase))
+                        if (!ctx.Request.Path.StartsWith(diagnosticsConfiguration.Path, StringComparison.OrdinalIgnoreCase))
                         {
                             return null;
                         }
 
-                        if (ctx.Request.Path.StartsWith(ResourcePrefix, StringComparison.OrdinalIgnoreCase))
+                        ctx.Items[ItemsKey] = true;
+
+                        var resourcePrefix =
+                            string.Concat(diagnosticsConfiguration.Path, "/Resources/");
+
+                        if (ctx.Request.Path.StartsWith(resourcePrefix, StringComparison.OrdinalIgnoreCase))
                         {
                             var resourceNamespace = "Nancy.Diagnostics.Resources";
 
-                            var path = Path.GetDirectoryName(ctx.Request.Url.Path.Replace(ResourcePrefix, string.Empty)) ?? string.Empty;
+                            var path = Path.GetDirectoryName(ctx.Request.Url.Path.Replace(resourcePrefix, string.Empty)) ?? string.Empty;
                             if (!string.IsNullOrEmpty(path))
                             {
-                                resourceNamespace += string.Format(".{0}", path.Replace('\\', '.'));
+                                resourceNamespace += string.Format(".{0}", path.Replace(Path.DirectorySeparatorChar, '.'));
                             }
 
                             return new EmbeddedFileResponse(
@@ -67,6 +72,8 @@ namespace Nancy.Diagnostics
                                 resourceNamespace,
                                 Path.GetFileName(ctx.Request.Url.Path));
                         }
+
+                        RewriteDiagnosticsUrl(diagnosticsConfiguration, ctx);
 
                         return diagnosticsConfiguration.Valid
                                    ? ExecuteDiagnostics(ctx, diagnosticsRouteResolver, diagnosticsConfiguration, serializer)
@@ -81,9 +88,9 @@ namespace Nancy.Diagnostics
 
         private static Response GetDiagnosticsHelpView(NancyContext ctx)
         {
-            var renderer = new DiagnosticsViewRenderer(ctx);
-
-            return renderer["help"];
+            return (StaticConfiguration.IsRunningDebug)
+                       ? new DiagnosticsViewRenderer(ctx)["help"]
+                       : HttpStatusCode.NotFound;
         }
 
         private static Response GetDiagnosticsLoginView(NancyContext ctx)
@@ -97,27 +104,26 @@ namespace Nancy.Diagnostics
         {
             var session = GetSession(ctx, diagnosticsConfiguration, serializer);
 
+            
+
             if (session == null)
             {
                 var view = GetDiagnosticsLoginView(ctx);
 
                 view.AddCookie(
-                    new NancyCookie(DiagsCookieName, String.Empty, true) { Expires = DateTime.Now.AddDays(-1) });
+                    new NancyCookie(diagnosticsConfiguration.CookieName, String.Empty, true) { Expires = DateTime.Now.AddDays(-1) });
 
                 return view;
             }
 
-            // TODO - duplicate the context and strip out the "_/Nancy" bit so we don't need to use it in the module
             var resolveResult = routeResolver.Resolve(ctx);
 
-            ctx.Parameters = resolveResult.Item2;
-            var resolveResultPreReq = resolveResult.Item3;
-            var resolveResultPostReq = resolveResult.Item4;
-            ExecuteRoutePreReq(ctx, resolveResultPreReq);
+            ctx.Parameters = resolveResult.Parameters;
+            ExecuteRoutePreReq(ctx, resolveResult.Before);
 
             if (ctx.Response == null)
             {
-                ctx.Response = resolveResult.Item1.Invoke(resolveResult.Item2);
+                ctx.Response = resolveResult.Route.Invoke(resolveResult.Parameters);
             }
 
             if (ctx.Request.Method.ToUpperInvariant() == "HEAD")
@@ -125,14 +131,13 @@ namespace Nancy.Diagnostics
                 ctx.Response = new HeadResponse(ctx.Response);
             }
 
-            if (resolveResultPostReq != null)
+            if (resolveResult.After != null)
             {
-                resolveResultPostReq.Invoke(ctx);
+                resolveResult.After.Invoke(ctx);
             }
 
             AddUpdateSessionCookie(session, ctx, diagnosticsConfiguration, serializer);
 
-            // If we duplicate the context this makes more sense :)
             return ctx.Response;
         }
 
@@ -143,14 +148,14 @@ namespace Nancy.Diagnostics
                 return;
             }
 
-            session.Expiry = DateTime.Now.AddMinutes(DiagnosticsSessionTimeoutMinutes);
+            session.Expiry = DateTime.Now.AddMinutes(diagnosticsConfiguration.SlidingTimeout);
             var serializedSession = serializer.Serialize(session);
 
             var encryptedSession = diagnosticsConfiguration.CryptographyConfiguration.EncryptionProvider.Encrypt(serializedSession);
             var hmacBytes = diagnosticsConfiguration.CryptographyConfiguration.HmacProvider.GenerateHmac(encryptedSession);
             var hmacString = Convert.ToBase64String(hmacBytes);
 
-            var cookie = new NancyCookie(DiagsCookieName, String.Format("{1}{0}", encryptedSession, hmacString), true);
+            var cookie = new NancyCookie(diagnosticsConfiguration.CookieName, String.Format("{1}{0}", encryptedSession, hmacString), true);
             
             context.Response.AddCookie(cookie);
         }
@@ -162,17 +167,17 @@ namespace Nancy.Diagnostics
                 return null;
             }
 
-            if (IsLoginRequest(context))
+            if (IsLoginRequest(context, diagnosticsConfiguration))
             {
                 return ProcessLogin(context, diagnosticsConfiguration, serializer);
             }
 
-            if (!context.Request.Cookies.ContainsKey(DiagsCookieName))
+            if (!context.Request.Cookies.ContainsKey(diagnosticsConfiguration.CookieName))
             {
                 return null;
             }
 
-            var encryptedValue = HttpUtility.UrlDecode(context.Request.Cookies[DiagsCookieName]);
+            var encryptedValue = HttpUtility.UrlDecode(context.Request.Cookies[diagnosticsConfiguration.CookieName]);
             var hmacStringLength = Base64Helpers.GetBase64Length(diagnosticsConfiguration.CryptographyConfiguration.HmacProvider.HmacLength);
             var encryptedSession = encryptedValue.Substring(hmacStringLength);
             var hmacString = encryptedValue.Substring(0, hmacStringLength);
@@ -219,16 +224,16 @@ namespace Nancy.Diagnostics
             {
                 Hash = hash,
                 Salt = salt,
-                Expiry = DateTime.Now.AddMinutes(DiagnosticsSessionTimeoutMinutes),
+                Expiry = DateTime.Now.AddMinutes(diagnosticsConfiguration.SlidingTimeout)
             };
 
             return session;
         }
 
-        private static bool IsLoginRequest(NancyContext context)
+        private static bool IsLoginRequest(NancyContext context, DiagnosticsConfiguration diagnosticsConfiguration)
         {
-            // This feels dirty :)
-            return context.Request.Method == "POST" && context.Request.Path == "/_Nancy/";
+            return context.Request.Method == "POST" &&
+                context.Request.Url.BasePath.TrimEnd(new[] { '/' }).EndsWith(diagnosticsConfiguration.Path);
         }
 
         private static void ExecuteRoutePreReq(NancyContext context, Func<NancyContext, Response> resolveResultPreReq)
@@ -243,6 +248,20 @@ namespace Nancy.Diagnostics
             if (resolveResultPreReqResponse != null)
             {
                 context.Response = resolveResultPreReqResponse;
+            }
+        }
+
+        private static void RewriteDiagnosticsUrl(DiagnosticsConfiguration diagnosticsConfiguration, NancyContext ctx)
+        {
+            ctx.Request.Url.BasePath =
+                string.Concat(ctx.Request.Url.BasePath, diagnosticsConfiguration.Path);
+
+            ctx.Request.Url.Path =
+                ctx.Request.Url.Path.Substring(diagnosticsConfiguration.Path.Length);
+
+            if (ctx.Request.Url.Path.Length.Equals(0))
+            {
+                ctx.Request.Url.Path = "/";
             }
         }
     }

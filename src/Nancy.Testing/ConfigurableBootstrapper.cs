@@ -2,20 +2,26 @@ namespace Nancy.Testing
 {
     using System;
     using System.Collections.Generic;
+    using System.IO;
     using System.Linq;
+    using System.Reflection;
+    using Localization;
     using Nancy.Bootstrapper;
     using Nancy.Conventions;
+    using Nancy.Culture;
     using Nancy.Diagnostics;
     using Nancy.ErrorHandling;
     using Nancy.ModelBinding;
     using Nancy.Routing;
+    using Nancy.Routing.Trie;
     using Nancy.Security;
+    using Nancy.TinyIoc;
     using Nancy.ViewEngines;
-    using TinyIoC;
+    using Responses.Negotiation;
     using Nancy.Validation;
 
     /// <summary>
-    /// A Nancy boostrapper that can be configured with either Type or Instance overrides for all Nancy types.
+    /// A Nancy bootstrapper that can be configured with either Type or Instance overrides for all Nancy types.
     /// </summary>
     public class ConfigurableBootstrapper : NancyBootstrapperWithRequestContainerBase<TinyIoCContainer>, IPipelines, INancyModuleCatalog
     {
@@ -23,8 +29,19 @@ namespace Nancy.Testing
         private readonly List<InstanceRegistration> registeredInstances;
         private readonly NancyInternalConfiguration configuration;
         private readonly ConfigurableModuleCatalog catalog;
-        private bool disableAutoRegistration;
+        private bool enableAutoRegistration;
         private DiagnosticsConfiguration diagnosticConfiguration;
+        private readonly List<Action<TinyIoCContainer, IPipelines>> applicationStartupActions;
+        private readonly List<Action<TinyIoCContainer, IPipelines, NancyContext>> requestStartupActions;
+
+        /// <summary>
+        /// Test project name suffixes that will be stripped from the test name project
+        /// in order to try and resolve the name of the assembly that is under test so
+        /// that all of its references can be loaded into the application domain.
+        /// </summary>
+        public static IList<string> TestAssemblySuffixes = new[] { "test", "tests", "unittests", "specs", "specifications" };
+
+        private bool allDiscoveredModules;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ConfigurableBootstrapper"/> class.
@@ -38,21 +55,53 @@ namespace Nancy.Testing
         /// Initializes a new instance of the <see cref="ConfigurableBootstrapper"/> class.
         /// </summary>
         /// <param name="configuration">The configuration that should be used by the bootstrapper.</param>
-        public ConfigurableBootstrapper(Action<ConfigurableBoostrapperConfigurator> configuration)
+        public ConfigurableBootstrapper(Action<ConfigurableBootstrapperConfigurator> configuration)
         {
             this.catalog = new ConfigurableModuleCatalog();
             this.configuration = NancyInternalConfiguration.Default;
             this.registeredTypes = new List<object>();
             this.registeredInstances = new List<InstanceRegistration>();
+            this.applicationStartupActions = new List<Action<TinyIoCContainer, IPipelines>>();
+            this.requestStartupActions = new List<Action<TinyIoCContainer, IPipelines, NancyContext>>();
+
+            var testAssembly =
+                Assembly.GetCallingAssembly();
+
+            PerformConventionBasedAssemblyLoading(testAssembly);
 
             if (configuration != null)
             {
                 var configurator =
-                    new ConfigurableBoostrapperConfigurator(this);
+                    new ConfigurableBootstrapperConfigurator(this);
 
-                configurator.ErrorHandler<PassThroughErrorHandler>();
-
+                configurator.StatusCodeHandler<PassThroughStatusCodeHandler>();
                 configuration.Invoke(configurator);
+            }
+        }
+
+        private static void PerformConventionBasedAssemblyLoading(Assembly testAssembly)
+        {
+            var testAssemblyName =
+                testAssembly.GetName().Name;
+
+            LoadReferencesForAssemblyUnderTest(testAssemblyName);
+        }
+
+        protected override void ApplicationStartup(TinyIoCContainer container, IPipelines pipelines)
+        {
+            base.ApplicationStartup(container, pipelines);
+            foreach (var action in this.applicationStartupActions)
+            {
+                action.Invoke(container, pipelines);
+            }
+        }
+
+        protected override void RequestStartup(TinyIoCContainer container, IPipelines pipelines, NancyContext context)
+        {
+            base.RequestStartup(container, pipelines, context);
+            foreach (var action in this.requestStartupActions)
+            {
+                action.Invoke(container, pipelines, context);
             }
         }
 
@@ -60,45 +109,87 @@ namespace Nancy.Testing
         /// Get all NancyModule implementation instances
         /// </summary>
         /// <param name="context">The current context</param>
-        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="NancyModule"/> instances.</returns>
-        public new IEnumerable<NancyModule> GetAllModules(NancyContext context)
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="INancyModule"/> instances.</returns>
+        public new IEnumerable<INancyModule> GetAllModules(NancyContext context)
         {
             return base.GetAllModules(context).Union(this.catalog.GetAllModules(context));
         }
 
         /// <summary>
-        /// Retrieves a specific <see cref="NancyModule"/> implementation based on its key
+        /// Retreive a specific module instance from the container
         /// </summary>
-        /// <param name="moduleKey">Module key</param>
-        /// <param name="context">The current context</param>
-        /// <returns>The <see cref="NancyModule"/> instance that was retrived by the <paramref name="moduleKey"/> parameter.</returns>
-        public new NancyModule GetModuleByKey(string moduleKey, NancyContext context)
+        /// <param name="container">Container to use</param>
+        /// <param name="moduleType">Type of the module</param>
+        /// <returns>INancyModule instance</returns>
+        protected override INancyModule GetModule(TinyIoCContainer container, Type moduleType)
         {
-            var module = 
-                this.catalog.GetModuleByKey(moduleKey, context);
+            var module =
+                this.catalog.GetModule(moduleType, null);
 
-            return module ?? base.GetModuleByKey(moduleKey, context);
+            if (module != null)
+            {
+                return module;
+            }
+
+            container.Register(typeof(INancyModule), moduleType);
+            return container.Resolve<INancyModule>();
         }
 
         private IEnumerable<ModuleRegistration> GetModuleRegistrations()
         {
-            return this.registeredTypes.Where(x => x.GetType().Equals(typeof(ModuleRegistration))).Cast<ModuleRegistration>();
+            return this.registeredTypes.Where(x => x is ModuleRegistration).Cast<ModuleRegistration>();
         }
 
         private IEnumerable<TypeRegistration> GetTypeRegistrations()
         {
-            return this.registeredTypes.Where(x => x.GetType().Equals(typeof(TypeRegistration))).Cast<TypeRegistration>();
+            return this.registeredTypes.Where(x => x is TypeRegistration).Cast<TypeRegistration>();
         }
 
         private IEnumerable<CollectionTypeRegistration> GetCollectionTypeRegistrations()
         {
-            return this.registeredTypes.Where(x => x.GetType().Equals(typeof(CollectionTypeRegistration))).Cast<CollectionTypeRegistration>();
+            return this.registeredTypes.Where(x => x.GetType() == typeof(CollectionTypeRegistration)).Cast<CollectionTypeRegistration>();
+        }
+
+        private static void LoadReferencesForAssemblyUnderTest(string testAssemblyName)
+        {
+            if (!TestAssemblySuffixes.Any(x => GetSafePathExtension(testAssemblyName).Equals("." + x, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            var testAssemblyNameWithoutExtension =
+                Path.GetFileNameWithoutExtension(testAssemblyName);
+
+            var testAssemblyPath =
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, string.Concat(testAssemblyNameWithoutExtension, ".dll"));
+
+            if (File.Exists(testAssemblyPath))
+            {
+                AppDomainAssemblyTypeScanner.LoadAssemblies(AppDomain.CurrentDomain.BaseDirectory, string.Concat(testAssemblyNameWithoutExtension, ".dll"));
+
+                var assemblyUnderTest = AppDomain.CurrentDomain
+                    .GetAssemblies()
+                    .FirstOrDefault(x => x.GetName().Name.Equals(testAssemblyNameWithoutExtension, StringComparison.OrdinalIgnoreCase));
+
+                if (assemblyUnderTest != null)
+                {
+                    foreach (var referencedAssembly in assemblyUnderTest.GetReferencedAssemblies())
+                    {
+                        AppDomainAssemblyTypeScanner.LoadAssemblies(AppDomain.CurrentDomain.BaseDirectory, string.Concat(referencedAssembly.Name, ".dll"));
+                    }
+                }
+            }
+        }
+
+        private static string GetSafePathExtension(string name)
+        {
+            return Path.GetExtension(name) ?? String.Empty;
         }
 
         private IEnumerable<Type> Resolve<T>()
         {
             var types = this.GetTypeRegistrations()
-                .Where(x => x.RegistrationType.Equals(typeof(T)))
+                .Where(x => x.RegistrationType == typeof(T))
                 .Select(x => x.ImplementationType)
                 .ToList();
 
@@ -121,7 +212,7 @@ namespace Nancy.Testing
             get
             {
                 var conventions = this.registeredInstances
-                    .Where(x => x.RegistrationType.Equals(typeof(NancyConventions)))
+                    .Where(x => x.RegistrationType == typeof(NancyConventions))
                     .Select(x => x.Implementation)
                     .Cast<NancyConventions>()
                     .FirstOrDefault();
@@ -140,7 +231,12 @@ namespace Nancy.Testing
                 var moduleRegistrations =
                     this.GetModuleRegistrations().ToList();
 
-                return (moduleRegistrations.Any()) ? moduleRegistrations : base.Modules;
+                if (moduleRegistrations.Any())
+                {
+                    return moduleRegistrations;
+                }
+
+                return this.allDiscoveredModules ? base.Modules : new ModuleRegistration[] { };
             }
         }
 
@@ -179,9 +275,9 @@ namespace Nancy.Testing
         /// <summary>
         /// Gets all startup tasks
         /// </summary>
-        protected override IEnumerable<Type> StartupTasks
+        protected override IEnumerable<Type> ApplicationStartupTasks
         {
-            get { return this.Resolve<IStartup>() ?? base.StartupTasks; }
+            get { return this.Resolve<IApplicationStartup>() ?? base.ApplicationStartupTasks; }
         }
 
         protected override DiagnosticsConfiguration DiagnosticsConfiguration
@@ -195,15 +291,9 @@ namespace Nancy.Testing
         /// <summary>
         /// Gets the root path provider
         /// </summary>
-        protected override Type RootPathProvider
+        protected override IRootPathProvider RootPathProvider
         {
-            get
-            {
-                var rootPathProvider =
-                    this.Resolve<IRootPathProvider>();
-
-                return (rootPathProvider != null) ? rootPathProvider.First() : base.RootPathProvider;
-            }
+            get { return new DefaultRootPathProvider(); }
         }
 
         /// <summary>
@@ -213,7 +303,7 @@ namespace Nancy.Testing
         /// <param name="container">Container instance</param>
         protected override void ConfigureApplicationContainer(TinyIoCContainer container)
         {
-            if (!this.disableAutoRegistration)
+            if (this.enableAutoRegistration)
             {
                 container.AutoRegister();
                 this.RegisterBootstrapperTypes(container);
@@ -234,10 +324,10 @@ namespace Nancy.Testing
         /// Retrieve all module instances from the container
         /// </summary>
         /// <param name="container">Container to use</param>
-        /// <returns>Collection of NancyModule instances</returns>
-        protected override IEnumerable<NancyModule> GetAllModules(TinyIoCContainer container)
+        /// <returns>Collection of INancyModule instances</returns>
+        protected override IEnumerable<INancyModule> GetAllModules(TinyIoCContainer container)
         {
-            return container.ResolveAll<NancyModule>(false);
+            return container.ResolveAll<INancyModule>(false);
         }
 
         /// <summary>
@@ -255,36 +345,44 @@ namespace Nancy.Testing
         /// <returns>INancyEngine implementation</returns>
         protected override INancyEngine GetEngineInternal()
         {
-            return this.ApplicationContainer.Resolve<INancyEngine>();
+            try
+            {
+                return this.ApplicationContainer.Resolve<INancyEngine>();
+            }
+            catch (InvalidOperationException ex)
+            {
+                throw new InvalidOperationException(
+                    "Something went wrong when trying to satisfy one of the dependencies during composition, make sure that you've registered all new dependencies in the container and specified either a module to test, or set AllDiscoveredModules in the ConfigurableBootstrapper. Inspect the innerexception for more details.",
+                    ex.InnerException);
+            }
         }
 
-        /// <summary>
-        /// Retreive a specific module instance from the container by its key
-        /// </summary>
-        /// <param name="container">Container to use</param>
-        /// <param name="moduleKey">Module key of the module</param>
-        /// <returns>NancyModule instance</returns>
-        protected override NancyModule GetModuleByKey(TinyIoCContainer container, string moduleKey)
-        {
-            return container.Resolve<NancyModule>(moduleKey);
-        }
 
         /// <summary>
-        /// Get the moduleKey generator
+        /// Gets the diagnostics for intialisation
         /// </summary>
-        /// <returns>IModuleKeyGenerator instance</returns>
-        protected override IModuleKeyGenerator GetModuleKeyGenerator()
+        /// <returns>IDagnostics implementation</returns>
+        protected override IDiagnostics GetDiagnostics()
         {
-            return this.ApplicationContainer.Resolve<IModuleKeyGenerator>();
+            return this.ApplicationContainer.Resolve<IDiagnostics>();
         }
 
         /// <summary>
         /// Gets all registered startup tasks
         /// </summary>
-        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IStartup"/> instances. </returns>
-        protected override IEnumerable<IStartup> GetStartupTasks()
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IApplicationStartup"/> instances. </returns>
+        protected override IEnumerable<IApplicationStartup> GetApplicationStartupTasks()
         {
-            return this.ApplicationContainer.ResolveAll<IStartup>(false);
+            return this.ApplicationContainer.ResolveAll<IApplicationStartup>(false);
+        }
+
+        /// <summary>
+        /// Gets all registered application registration tasks
+        /// </summary>
+        /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="IApplicationRegistrations"/> instances.</returns>
+        protected override IEnumerable<IApplicationRegistrations> GetApplicationRegistrationTasks()
+        {
+            return this.ApplicationContainer.ResolveAll<IApplicationRegistrations>(false);
         }
 
         /// <summary>
@@ -296,7 +394,7 @@ namespace Nancy.Testing
         protected override void RegisterBootstrapperTypes(TinyIoCContainer applicationContainer)
         {
             var moduleCatalog = this.registeredInstances
-                .Where(x => x.RegistrationType.Equals(typeof(INancyModuleCatalog)))
+                .Where(x => x.RegistrationType == typeof(INancyModuleCatalog))
                 .Select(x => x.Implementation)
                 .Cast<INancyModuleCatalog>()
                 .FirstOrDefault() ?? this;
@@ -314,8 +412,8 @@ namespace Nancy.Testing
             var configuredTypes = this.GetTypeRegistrations().ToList();
 
             typeRegistrations = configuredTypes
-                .Concat(typeRegistrations.Where(x => !configuredTypes.Any(y => y.RegistrationType.Equals(x.RegistrationType))))
-                .Where(x => !this.registeredInstances.Any(y => y.RegistrationType.Equals(x.RegistrationType)));
+                .Concat(typeRegistrations.Where(x => configuredTypes.All(y => y.RegistrationType != x.RegistrationType)))
+                .Where(x => this.registeredInstances.All(y => y.RegistrationType != x.RegistrationType));
 
             foreach (var typeRegistration in typeRegistrations)
             {
@@ -334,7 +432,7 @@ namespace Nancy.Testing
             var configuredCollectionTypes = this.GetCollectionTypeRegistrations().ToList();
 
             collectionTypeRegistrations = configuredCollectionTypes
-                .Concat(collectionTypeRegistrations.Where(x => !configuredCollectionTypes.Any(y => y.RegistrationType.Equals(x.RegistrationType))));
+                .Concat(collectionTypeRegistrations.Where(x => configuredCollectionTypes.All(y => y.RegistrationType != x.RegistrationType)));
 
             foreach (var collectionTypeRegistration in collectionTypeRegistrations)
             {
@@ -350,8 +448,8 @@ namespace Nancy.Testing
         protected override void RegisterInstances(TinyIoCContainer container, IEnumerable<InstanceRegistration> instanceRegistrations)
         {
             instanceRegistrations = this.registeredInstances
-                .Concat(instanceRegistrations.Where(x => !this.registeredInstances.Any(y => y.RegistrationType.Equals(x.RegistrationType))))
-                .Where(x => !this.GetTypeRegistrations().Any(y => y.RegistrationType.Equals(x.RegistrationType)));
+                .Concat(instanceRegistrations.Where(x => this.registeredInstances.All(y => y.RegistrationType != x.RegistrationType)))
+                .Where(x => this.GetTypeRegistrations().All(y => y.RegistrationType != x.RegistrationType));
 
             foreach (var instanceRegistration in instanceRegistrations)
             {
@@ -371,13 +469,12 @@ namespace Nancy.Testing
             foreach (var moduleRegistrationType in moduleRegistrationTypes)
             {
                 container.Register(
-                    typeof(NancyModule),
+                    typeof(INancyModule),
                     moduleRegistrationType.ModuleType,
-                    moduleRegistrationType.ModuleKey).
+                    moduleRegistrationType.ModuleType.FullName).
                     AsSingleton();
             }
         }
-
 
         /// <summary>
         /// <para>
@@ -428,20 +525,28 @@ namespace Nancy.Testing
         /// <summary>
         /// Provides an API for configuring a <see cref="ConfigurableBootstrapper"/> instance.
         /// </summary>
-        public class ConfigurableBoostrapperConfigurator
+        public class ConfigurableBootstrapperConfigurator
         {
             private readonly ConfigurableBootstrapper bootstrapper;
 
             /// <summary>
-            /// Initializes a new instance of the <see cref="ConfigurableBoostrapperConfigurator"/> class.
+            /// Initializes a new instance of the <see cref="ConfigurableBootstrapperConfigurator"/> class.
             /// </summary>
             /// <param name="bootstrapper">The bootstrapper that should be configured.</param>
-            public ConfigurableBoostrapperConfigurator(ConfigurableBootstrapper bootstrapper)
+            public ConfigurableBootstrapperConfigurator(ConfigurableBootstrapper bootstrapper)
             {
                 this.bootstrapper = bootstrapper;
+                this.Diagnostics<DisabledDiagnostics>();
             }
 
-            public ConfigurableBoostrapperConfigurator Binder(IBinder binder)
+            public ConfigurableBootstrapperConfigurator AllDiscoveredModules()
+            {
+                this.bootstrapper.allDiscoveredModules = true;
+
+                return this;
+            }
+
+            public ConfigurableBootstrapperConfigurator Binder(IBinder binder)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IBinder), binder));
@@ -449,12 +554,18 @@ namespace Nancy.Testing
                 return this;
             }
 
+            public ConfigurableBootstrapperConfigurator Assembly(string pattern)
+            {
+                AppDomainAssemblyTypeScanner.LoadAssemblies(AppDomain.CurrentDomain.BaseDirectory, pattern);
+                return this;
+            }
+
             /// <summary>
             /// Configures the bootstrapper to create an <see cref="IBinder"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IBinder"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Binder<T>() where T : IBinder
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Binder<T>() where T : IBinder
             {
                 this.bootstrapper.configuration.Binder = typeof(T);
                 return this;
@@ -464,8 +575,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="INancyContextFactory"/>.
             /// </summary>
             /// <param name="contextFactory">The <see cref="INancyContextFactory"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ContextFactory(INancyContextFactory contextFactory)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ContextFactory(INancyContextFactory contextFactory)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(INancyContextFactory), contextFactory));
@@ -477,10 +588,40 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="INancyContextFactory"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="INancyContextFactory"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ContextFactory<T>() where T : INancyContextFactory
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ContextFactory<T>() where T : INancyContextFactory
             {
                 this.bootstrapper.configuration.ContextFactory = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided type as a dependency.
+            /// </summary>
+            /// <param name="type">The type of the dependency that should be used registered with the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Dependency<T>(Type type)
+            {
+                this.bootstrapper.registeredTypes.Add(new TypeRegistration(typeof(T), type));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to register the specified type as a dependency.
+            /// </summary>
+            /// <typeparam name="T">The type of the dependency that should be registered with the bootstrapper.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            /// <remarks>This method will register the type for all the interfaces it implements and the type itself.</remarks>
+            public ConfigurableBootstrapperConfigurator Dependency<T>()
+            {
+                this.bootstrapper.registeredTypes.Add(new TypeRegistration(typeof(T), typeof(T)));
+
+                foreach (var interfaceType in typeof(T).GetInterfaces())
+                {
+                    this.bootstrapper.registeredTypes.Add(new TypeRegistration(interfaceType, typeof(T)));
+                }
+
                 return this;
             }
 
@@ -488,9 +629,9 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance as a dependency.
             /// </summary>
             /// <param name="instance">The dependency instance that should be used registered with the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
             /// <remarks>This method will register the instance for all the interfaces it implements and the type itself.</remarks>
-            public ConfigurableBoostrapperConfigurator Dependency(object instance)
+            public ConfigurableBootstrapperConfigurator Dependency(object instance)
             {
                 this.bootstrapper.registeredInstances.Add(new InstanceRegistration(instance.GetType(), instance));
 
@@ -505,9 +646,9 @@ namespace Nancy.Testing
             /// <summary>
             /// Configures the bootstrapper to register the specified type as a dependency.
             /// </summary>
-            /// <typeparam name="T">The type of the dependency that should be registered with the bootstrapper.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Dependency<T>(object instance)
+            /// <typeparam name="T">The type that the dependencies should be registered as.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Dependency<T>(object instance)
             {
                 this.bootstrapper.registeredInstances.Add(new InstanceRegistration(typeof(T), instance));
                 return this;
@@ -517,8 +658,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to register the specified instances as a dependencies.
             /// </summary>
             /// <param name="dependencies">The instances of the dependencies that should be registered with the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Dependencies(params object[] dependencies)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Dependencies(params object[] dependencies) 
             {
                 foreach (var dependency in dependencies)
                 {
@@ -529,35 +670,85 @@ namespace Nancy.Testing
             }
 
             /// <summary>
+            /// Configures the bootstrapper to register the specified types and instances as a dependencies.
+            /// </summary>
+            /// <param name="dependencies">An array of maps between the interfaces and instances that should be registered with the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator MappedDependencies<T, K>(IEnumerable<Tuple<T, K>> dependencies) 
+                where T : Type
+                where K: class 
+            {
+                foreach (var dependency in dependencies)
+                {
+                   this.bootstrapper.registeredInstances.Add(
+                       new InstanceRegistration(dependency.Item1, dependency.Item2));
+                }
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to register the specified instances as a dependencies.
+            /// </summary>
+            /// <param name="dependencies">The instances of the dependencies that should be registered with the bootstrapper.</param>
+            /// <typeparam name="T">The type that the dependencies should be registered as.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Dependencies<T>(params object[] dependencies)
+            {
+                foreach (var dependency in dependencies)
+                {
+                    this.Dependency<T>(dependency);
+                }
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided types as a dependency.
+            /// </summary>
+            /// <param name="dependencies">The types that should be used registered as dependencies with the bootstrapper.</param>
+            /// <typeparam name="T">The type that the dependencies should be registered as.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Dependencies<T>(params Type[] dependencies)
+            {
+                foreach (var dependency in dependencies)
+                {
+                    this.Dependency<T>(dependency);
+                }
+
+                return this;
+            }
+
+            /// <summary>
             /// Disables the auto registration behavior of the bootstrapper
             /// </summary>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator DisableAutoRegistration()
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator EnableAutoRegistration()
             {
-                this.bootstrapper.disableAutoRegistration = true;
+                this.bootstrapper.enableAutoRegistration = true;
                 return this;
             }
 
             /// <summary>
-            /// Configures the bootstrapper to use the provided instance of <see cref="IErrorHandler"/>.
+            /// Configures the bootstrapper to use the provided instance of <see cref="IStatusCodeHandler"/>.
             /// </summary>
-            /// <param name="errorHandlers">The <see cref="IErrorHandler"/> types that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ErrorHandlers(params Type[] errorHandlers)
+            /// <param name="statusCodeHandlers">The <see cref="IStatusCodeHandler"/> types that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator StatusCodeHandlers(params Type[] statusCodeHandlers)
             {
-                this.bootstrapper.configuration.ErrorHandlers = new List<Type>(errorHandlers);
+                this.bootstrapper.configuration.StatusCodeHandlers = new List<Type>(statusCodeHandlers);
 
                 return this;
             }
 
             /// <summary>
-            /// Configures the bootstrapper to create an <see cref="IErrorHandler"/> instance of the specified type.
+            /// Configures the bootstrapper to create an <see cref="IStatusCodeHandler"/> instance of the specified type.
             /// </summary>
-            /// <typeparam name="T">The type of the <see cref="IErrorHandler"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ErrorHandler<T>() where T : IErrorHandler
+            /// <typeparam name="T">The type of the <see cref="IStatusCodeHandler"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator StatusCodeHandler<T>() where T : IStatusCodeHandler
             {
-                this.bootstrapper.configuration.ErrorHandlers = new List<Type>( new[] { typeof(T) } );
+                this.bootstrapper.configuration.StatusCodeHandlers = new List<Type>(new[] { typeof(T) });
                 return this;
             }
 
@@ -565,8 +756,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IFieldNameConverter"/>.
             /// </summary>
             /// <param name="fieldNameConverter">The <see cref="IFieldNameConverter"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator FieldNameConverter(IFieldNameConverter fieldNameConverter)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator FieldNameConverter(IFieldNameConverter fieldNameConverter)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IFieldNameConverter), fieldNameConverter));
@@ -578,8 +769,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IFieldNameConverter"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IFieldNameConverter"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator FieldNameConverter<T>() where T : IFieldNameConverter
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator FieldNameConverter<T>() where T : IFieldNameConverter
             {
                 this.bootstrapper.configuration.FieldNameConverter = typeof(T);
                 return this;
@@ -589,8 +780,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IModelBinderLocator"/>.
             /// </summary>
             /// <param name="modelBinderLocator">The <see cref="IModelBinderLocator"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ModelBinderLocator(IModelBinderLocator modelBinderLocator)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ModelBinderLocator(IModelBinderLocator modelBinderLocator)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IModelBinderLocator), modelBinderLocator));
@@ -602,47 +793,44 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IModelBinderLocator"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IModelBinderLocator"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ModelBinderLocator<T>() where T : IModelBinderLocator
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ModelBinderLocator<T>() where T : IModelBinderLocator
             {
                 this.bootstrapper.configuration.ModelBinderLocator = typeof(T);
                 return this;
             }
 
             /// <summary>
-            /// Configures the bootstrapper to create a <see cref="NancyModule"/> instance of the specified type.
+            /// Configures the bootstrapper to create a <see cref="INancyModule"/> instance of the specified type.
             /// </summary>
-            /// <typeparam name="T">The type of the <see cref="NancyModule"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Module<T>() where T : NancyModule
+            /// <typeparam name="T">The type of the <see cref="INancyModule"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Module<T>() where T : INancyModule
             {
                 return this.Modules(typeof(T));
             }
 
             /// <summary>
-            /// Configures the boostrapper to register the provided <see cref="NancyModule"/> instance.
+            /// Configures the bootstrapper to register the provided <see cref="INancyModule"/> instance.
             /// </summary>
-            /// <param name="module">The <see cref="NancyModule"/> instance to register.</param>
-            /// <param name="moduleKey">The module key of the module that is being registered.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Module(NancyModule module, string moduleKey)
+            /// <param name="module">The <see cref="INancyModule"/> instance to register.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Module(INancyModule module)
             {
-                this.bootstrapper.catalog.RegisterModuleInstance(module, moduleKey);
+                this.bootstrapper.catalog.RegisterModuleInstance(module);
                 return this;
             }
 
             /// <summary>
-            /// Configures the bootstrapper to create <see cref="NancyModule"/> instances of the specified types.
+            /// Configures the bootstrapper to create <see cref="INancyModule"/> instances of the specified types.
             /// </summary>
-            /// <param name="modules">The types of the <see cref="NancyModule"/> that the bootstrapper should use.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Modules(params Type[] modules)
+            /// <param name="modules">The types of the <see cref="INancyModule"/> that the bootstrapper should use.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Modules(params Type[] modules)
             {
-                var keyGenerator = new DefaultModuleKeyGenerator();
-
                 var moduleRegistrations =
                     from module in modules
-                    select new ModuleRegistration(module, keyGenerator.GetKeyForModuleType(module));
+                    select new ModuleRegistration(module);
 
                 this.bootstrapper.registeredTypes.AddRange(moduleRegistrations);
 
@@ -653,8 +841,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="INancyEngine"/>.
             /// </summary>
             /// <param name="engine">The <see cref="INancyEngine"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator NancyEngine(INancyEngine engine)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator NancyEngine(INancyEngine engine)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(INancyEngine), engine));
@@ -666,8 +854,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="INancyEngine"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="INancyEngine"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator NancyEngine<T>() where T : INancyEngine
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator NancyEngine<T>() where T : INancyEngine
             {
                 this.bootstrapper.configuration.NancyEngine = typeof(T);
                 return this;
@@ -677,8 +865,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="INancyModuleBuilder"/>.
             /// </summary>
             /// <param name="nancyModuleBuilder">The <see cref="INancyModuleBuilder"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator NancyModuleBuilder(INancyModuleBuilder nancyModuleBuilder)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator NancyModuleBuilder(INancyModuleBuilder nancyModuleBuilder)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(INancyModuleBuilder), nancyModuleBuilder));
@@ -690,8 +878,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="INancyModuleBuilder"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="INancyModuleBuilder"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator NancyModuleBuilder<T>() where T : INancyModuleBuilder
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator NancyModuleBuilder<T>() where T : INancyModuleBuilder
             {
                 this.bootstrapper.configuration.NancyModuleBuilder = typeof(T);
                 return this;
@@ -701,8 +889,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRenderContextFactory"/>.
             /// </summary>
             /// <param name="renderContextFactory">The <see cref="IRenderContextFactory"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RenderContextFactory(IRenderContextFactory renderContextFactory)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RenderContextFactory(IRenderContextFactory renderContextFactory)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRenderContextFactory), renderContextFactory));
@@ -714,8 +902,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IRenderContextFactory"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRenderContextFactory"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RenderContextFactory<T>() where T : IRenderContextFactory
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RenderContextFactory<T>() where T : IRenderContextFactory
             {
                 this.bootstrapper.configuration.RenderContextFactory = typeof(T);
                 return this;
@@ -725,8 +913,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IResponseFormatterFactory"/>.
             /// </summary>
             /// <param name="responseFormatterFactory">The <see cref="IResponseFormatterFactory"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ResponseFormatterFactory(IResponseFormatterFactory responseFormatterFactory)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResponseFormatterFactory(IResponseFormatterFactory responseFormatterFactory)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IResponseFormatterFactory), responseFormatterFactory));
@@ -738,8 +926,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IResponseFormatterFactory"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IResponseFormatterFactory"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ResponseFormatterFactory<T>() where T : IResponseFormatterFactory
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResponseFormatterFactory<T>() where T : IResponseFormatterFactory
             {
                 this.bootstrapper.configuration.ResponseFormatterFactory = typeof(T);
                 return this;
@@ -749,8 +937,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRouteCache"/>.
             /// </summary>
             /// <param name="routeCache">The <see cref="IRouteCache"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteCache(IRouteCache routeCache)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteCache(IRouteCache routeCache)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRouteCache), routeCache));
@@ -762,8 +950,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IRouteCache"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRouteCache"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteCache<T>() where T : IRouteCache
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteCache<T>() where T : IRouteCache
             {
                 this.bootstrapper.configuration.RouteCache = typeof(T);
                 return this;
@@ -773,8 +961,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRouteCacheProvider"/>.
             /// </summary>
             /// <param name="routeCacheProvider">The <see cref="IRouteCacheProvider"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteCacheProvider(IRouteCacheProvider routeCacheProvider)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteCacheProvider(IRouteCacheProvider routeCacheProvider)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRouteCacheProvider), routeCacheProvider));
@@ -786,8 +974,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IRouteCacheProvider"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRouteCacheProvider"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteCacheProvider<T>() where T : IRouteCacheProvider
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteCacheProvider<T>() where T : IRouteCacheProvider
             {
                 this.bootstrapper.configuration.RouteCacheProvider = typeof(T);
                 return this;
@@ -797,8 +985,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRootPathProvider"/>.
             /// </summary>
             /// <param name="rootPathProvider">The <see cref="IRootPathProvider"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RootPathProvider(IRootPathProvider rootPathProvider)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RootPathProvider(IRootPathProvider rootPathProvider)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRootPathProvider), rootPathProvider));
@@ -810,8 +998,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IRootPathProvider"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRootPathProvider"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RootPathProvider<T>() where T : IRootPathProvider
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RootPathProvider<T>() where T : IRootPathProvider
             {
                 this.bootstrapper.registeredTypes.Add(
                     new TypeRegistration(typeof(IRootPathProvider), typeof(T)));
@@ -823,8 +1011,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRoutePatternMatcher"/>.
             /// </summary>
             /// <param name="routePatternMatcher">The <see cref="IRoutePatternMatcher"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RoutePatternMatcher(IRoutePatternMatcher routePatternMatcher)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RoutePatternMatcher(IRoutePatternMatcher routePatternMatcher)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRoutePatternMatcher), routePatternMatcher));
@@ -833,11 +1021,35 @@ namespace Nancy.Testing
             }
 
             /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IRouteInvoker"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IRouteInvoker"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteInvoker<T>() where T : IRouteInvoker
+            {
+                this.bootstrapper.configuration.RouteInvoker = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IRouteInvoker"/>.
+            /// </summary>
+            /// <param name="routeInvoker">The <see cref="IRouteInvoker"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteInvoker(IRouteInvoker routeInvoker)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IRouteInvoker), routeInvoker));
+
+                return this;
+            }
+
+            /// <summary>
             /// Configures the bootstrapper to create an <see cref="IRoutePatternMatcher"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRoutePatternMatcher"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RoutePatternMatcher<T>() where T : IRoutePatternMatcher
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RoutePatternMatcher<T>() where T : IRoutePatternMatcher
             {
                 this.bootstrapper.configuration.RoutePatternMatcher = typeof(T);
                 return this;
@@ -847,8 +1059,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IRouteResolver"/>.
             /// </summary>
             /// <param name="routeResolver">The <see cref="IRouteResolver"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteResolver(IRouteResolver routeResolver)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteResolver(IRouteResolver routeResolver)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IRouteResolver), routeResolver));
@@ -860,8 +1072,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IRouteResolver"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IRouteResolver"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator RouteResolver<T>() where T : IRouteResolver
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteResolver<T>() where T : IRouteResolver
             {
                 this.bootstrapper.configuration.RouteResolver = typeof(T);
                 return this;
@@ -871,8 +1083,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IModelValidatorLocator"/>.
             /// </summary>
             /// <param name="modelValidatorLocator">The <see cref="IModelValidatorLocator"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ModelValidatorLocator(IModelValidatorLocator modelValidatorLocator)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ModelValidatorLocator(IModelValidatorLocator modelValidatorLocator)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IModelValidatorLocator), modelValidatorLocator));
@@ -884,10 +1096,162 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IModelValidatorLocator"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IModelValidatorLocator"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ModelValidatorLocator<T>() where T : IModelValidatorLocator
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ModelValidatorLocator<T>() where T : IModelValidatorLocator
             {
                 this.bootstrapper.configuration.ModelValidatorLocator = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IRequestDispatcher"/>.
+            /// </summary>
+            /// <param name="requestDispatcher">The <see cref="IRequestDispatcher"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RequestDispatcher(IRequestDispatcher requestDispatcher)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IRequestDispatcher), requestDispatcher));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IRequestDispatcher"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IRequestDispatcher"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RequestDispatcher<T>() where T : IRequestDispatcher
+            {
+                this.bootstrapper.registeredTypes.Add(
+                    new TypeRegistration(typeof(IRequestDispatcher), typeof(T)));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IResourceAssemblyProvider"/>.
+            /// </summary>
+            /// <param name="resourceAssemblyProvider">The <see cref="IResourceAssemblyProvider"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResourceAssemblyProvider(IResourceAssemblyProvider resourceAssemblyProvider)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IResourceAssemblyProvider), resourceAssemblyProvider));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IResourceAssemblyProvider"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IResourceAssemblyProvider"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResourceAssemblyProvider<T>() where T : IResourceAssemblyProvider
+            {
+                this.bootstrapper.configuration.ResourceAssemblyProvider = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IRouteDescriptionProvider"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IRouteDescriptionProvider"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteDescriptionProvider<T>() where T : IRouteDescriptionProvider
+            {
+                this.bootstrapper.registeredTypes.Add(
+                    new TypeRegistration(typeof(IRouteDescriptionProvider), typeof(T)));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IRouteDescriptionProvider"/>.
+            /// </summary>
+            /// <param name="routeDescriptionProvider">The <see cref="IRouteDescriptionProvider"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteDescriptionProvider(IRouteDescriptionProvider routeDescriptionProvider)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IRouteDescriptionProvider), routeDescriptionProvider));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IRouteSegmentExtractor"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IRouteSegmentExtractor"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteSegmentExtractor<T>() where T : IRouteSegmentExtractor
+            {
+                this.bootstrapper.registeredTypes.Add(
+                    new TypeRegistration(typeof(IRouteSegmentExtractor), typeof(T)));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IRouteSegmentExtractor"/>.
+            /// </summary>
+            /// <param name="routeSegmentExtractor">The <see cref="IRouteSegmentExtractor"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteSegmentExtractor(IRouteSegmentExtractor routeSegmentExtractor)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IRouteSegmentExtractor), routeSegmentExtractor));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IResponseProcessor"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IResponseProcessor"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResponseProcessor<T>() where T : IResponseProcessor
+            {
+                this.bootstrapper.registeredTypes.Add(
+                    new CollectionTypeRegistration(typeof(IResponseProcessor), new[] { typeof(T) }));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided <see cref="IResponseProcessor"/> types.
+            /// </summary>
+            /// <param name="responseProcessors">The <see cref="IResponseProcessor"/> types that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ResponseProcessors(params Type[] responseProcessors)
+            {
+                this.bootstrapper.registeredTypes.Add(
+                    new CollectionTypeRegistration(typeof(IResponseProcessor), responseProcessors));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="ITextResource"/>.
+            /// </summary>
+            /// <param name="textResource">The <see cref="ITextResource"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator TextResource(ITextResource textResource)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(ITextResource), textResource));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="ITextResource"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="ITextResource"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator TextResource<T>() where T : ITextResource
+            {
+                this.bootstrapper.configuration.TextResource = typeof(T);
                 return this;
             }
 
@@ -895,8 +1259,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewCache"/>.
             /// </summary>
             /// <param name="viewCache">The <see cref="IViewCache"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewCache(IViewCache viewCache)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewCache(IViewCache viewCache)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewCache), viewCache));
@@ -908,8 +1272,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewCache"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewCache"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewCache<T>() where T : IViewCache
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewCache<T>() where T : IViewCache
             {
                 this.bootstrapper.configuration.ViewCache = typeof(T);
                 return this;
@@ -919,8 +1283,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewEngine"/>.
             /// </summary>
             /// <param name="viewEngine">The <see cref="IViewEngine"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewEngine(IViewEngine viewEngine)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewEngine(IViewEngine viewEngine)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewEngine), viewEngine));
@@ -932,8 +1296,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewEngine"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewEngine"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewEngine<T>() where T : IViewEngine
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewEngine<T>() where T : IViewEngine
             {
                 this.bootstrapper.registeredTypes.Add(
                     new CollectionTypeRegistration(typeof(IViewEngine), new[] { typeof(T) }));
@@ -945,8 +1309,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided <see cref="IViewEngine"/> types.
             /// </summary>
             /// <param name="viewEngines">The <see cref="IViewEngine"/> types that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewEngines(params Type[] viewEngines)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewEngines(params Type[] viewEngines)
             {
                 this.bootstrapper.registeredTypes.Add(
                     new CollectionTypeRegistration(typeof(IViewEngine), viewEngines));
@@ -958,8 +1322,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewFactory"/>.
             /// </summary>
             /// <param name="viewFactory">The <see cref="IViewFactory"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewFactory(IViewFactory viewFactory)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewFactory(IViewFactory viewFactory)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewFactory), viewFactory));
@@ -971,34 +1335,10 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewFactory"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewFactory"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewFactory<T>() where T : IViewFactory
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewFactory<T>() where T : IViewFactory
             {
                 this.bootstrapper.configuration.ViewFactory = typeof(T);
-                return this;
-            }
-
-            /// <summary>
-            /// Configures the bootstrapper to use the provided instance of <see cref="IViewLocationCache"/>.
-            /// </summary>
-            /// <param name="viewLocationCache">The <see cref="IViewLocationCache"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocationCache(IViewLocationCache viewLocationCache)
-            {
-                this.bootstrapper.registeredInstances.Add(
-                    new InstanceRegistration(typeof(IViewLocationCache), viewLocationCache));
-
-                return this;
-            }
-
-            /// <summary>
-            /// Configures the bootstrapper to create an <see cref="IViewLocationCache"/> instance of the specified type.
-            /// </summary>
-            /// <typeparam name="T">The type of the <see cref="IViewLocationCache"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocationCache<T>() where T : IViewLocationCache
-            {
-                this.bootstrapper.configuration.ViewLocationCache = typeof(T);
                 return this;
             }
 
@@ -1006,8 +1346,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewLocationProvider"/>.
             /// </summary>
             /// <param name="viewLocationProvider">The <see cref="IViewLocationProvider"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocationProvider(IViewLocationProvider viewLocationProvider)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewLocationProvider(IViewLocationProvider viewLocationProvider)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewLocationProvider), viewLocationProvider));
@@ -1019,8 +1359,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewLocationProvider"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewLocationProvider"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocationProvider<T>() where T : IViewLocationProvider
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewLocationProvider<T>() where T : IViewLocationProvider
             {
                 this.bootstrapper.configuration.ViewLocationProvider = typeof(T);
                 return this;
@@ -1030,8 +1370,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewLocator"/>.
             /// </summary>
             /// <param name="viewLocator">The <see cref="IViewLocator"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocator(IViewLocator viewLocator)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewLocator(IViewLocator viewLocator)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewLocator), viewLocator));
@@ -1043,8 +1383,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewLocator"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewLocator"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewLocator<T>() where T : IViewLocator
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewLocator<T>() where T : IViewLocator
             {
                 this.bootstrapper.configuration.ViewLocator = typeof(T);
                 return this;
@@ -1054,8 +1394,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IViewResolver"/>.
             /// </summary>
             /// <param name="viewResolver">The <see cref="IViewResolver"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewResolver(IViewResolver viewResolver)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewResolver(IViewResolver viewResolver)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IViewResolver), viewResolver));
@@ -1067,8 +1407,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IViewResolver"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IViewResolver"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ViewResolver<T>() where T : IViewResolver
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ViewResolver<T>() where T : IViewResolver
             {
                 this.bootstrapper.configuration.ViewResolver = typeof(T);
                 return this;
@@ -1078,8 +1418,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="ICsrfTokenValidator"/>.
             /// </summary>
             /// <param name="tokenValidator">The <see cref="ICsrfTokenValidator"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator CsrfTokenValidator(ICsrfTokenValidator tokenValidator)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator CsrfTokenValidator(ICsrfTokenValidator tokenValidator)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(ICsrfTokenValidator), tokenValidator));
@@ -1091,8 +1431,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="ICsrfTokenValidator"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="ICsrfTokenValidator"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator CsrfTokenValidator<T>() where T : ICsrfTokenValidator
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator CsrfTokenValidator<T>() where T : ICsrfTokenValidator
             {
                 this.bootstrapper.configuration.CsrfTokenValidator = typeof(T);
                 return this;
@@ -1102,8 +1442,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use the provided instance of <see cref="IObjectSerializer"/>.
             /// </summary>
             /// <param name="objectSerializer">The <see cref="IObjectSerializer"/> instance that should be used by the bootstrapper.</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ObjectSerializer(IObjectSerializer objectSerializer)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ObjectSerializer(IObjectSerializer objectSerializer)
             {
                 this.bootstrapper.registeredInstances.Add(
                     new InstanceRegistration(typeof(IObjectSerializer), objectSerializer));
@@ -1115,8 +1455,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to create an <see cref="IObjectSerializer"/> instance of the specified type.
             /// </summary>
             /// <typeparam name="T">The type of the <see cref="IObjectSerializer"/> that the bootstrapper should use.</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator ObjectSerializer<T>() where T : IObjectSerializer
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator ObjectSerializer<T>() where T : IObjectSerializer
             {
                 this.bootstrapper.configuration.ObjectSerializer = typeof(T);
                 return this;
@@ -1127,8 +1467,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use a specific serializer
             /// </summary>
             /// <typeparam name="T">Serializer type</typeparam>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Serializer<T>() where T : ISerializer
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Serializer<T>() where T : ISerializer
             {
                 this.bootstrapper.configuration.Serializers = new List<Type> { typeof(T) };
                 return this;
@@ -1138,8 +1478,8 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use specific serializers
             /// </summary>
             /// <param name="serializers">Collection of serializer types</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator Serializers(params Type[] serializers)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Serializers(params Type[] serializers)
             {
                 this.bootstrapper.configuration.Serializers = new List<Type>(serializers);
                 return this;
@@ -1149,58 +1489,189 @@ namespace Nancy.Testing
             /// Configures the bootstrapper to use a specific diagnostics configuration
             /// </summary>
             /// <param name="diagnosticsConfiguration">Diagnostics configuration to use</param>
-            /// <returns>A reference to the current <see cref="ConfigurableBoostrapperConfigurator"/>.</returns>
-            public ConfigurableBoostrapperConfigurator DiagnosticsConfiguration(DiagnosticsConfiguration diagnosticsConfiguration)
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator DiagnosticsConfiguration(DiagnosticsConfiguration diagnosticsConfiguration)
             {
                 this.bootstrapper.diagnosticConfiguration = diagnosticsConfiguration;
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IDiagnostics"/>.
+            /// </summary>
+            /// <param name="diagnostics">The <see cref="IDiagnostics"/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Diagnostics(IDiagnostics diagnostics)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IDiagnostics), diagnostics));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IDiagnostics"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IDiagnostics"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator Diagnostics<T>() where T : IDiagnostics
+            {
+                this.bootstrapper.configuration.Diagnostics = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="ICultureService "/>.
+            /// </summary>
+            /// <param name="cultureService">The <see cref="ICultureService "/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator CultureService(ICultureService cultureService)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(ICultureService), cultureService));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="ICultureService"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="ICultureService"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator CultureService<T>() where T : ICultureService
+            {
+                this.bootstrapper.configuration.CultureService = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="ICultureService "/>.
+            /// </summary>
+            /// <param name="staticContentProvider">The <see cref="IStaticContentProvider "/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator StaticContentProvider(IStaticContentProvider staticContentProvider)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IStaticContentProvider), staticContentProvider));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IStaticContentProvider"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IStaticContentProvider"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator StaticContentProvider<T>() where T : IStaticContentProvider
+            {
+                this.bootstrapper.configuration.StaticContentProvider = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="IRouteResolverTrie "/>.
+            /// </summary>
+            /// <param name="routeResolverTrie">The <see cref="IStaticContentProvider "/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteResolverTrie(IRouteResolverTrie routeResolverTrie)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(IRouteResolverTrie), routeResolverTrie));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="IRouteResolverTrie"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="IRouteResolverTrie"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator RouteResolverTrie<T>() where T : IRouteResolverTrie
+            {
+                this.bootstrapper.configuration.RouteResolverTrie = typeof(T);
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to use the provided instance of <see cref="ITrieNodeFactory "/>.
+            /// </summary>
+            /// <param name="nodeFactory">The <see cref="ITrieNodeFactory "/> instance that should be used by the bootstrapper.</param>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator TrieNodeFactory(ITrieNodeFactory nodeFactory)
+            {
+                this.bootstrapper.registeredInstances.Add(
+                    new InstanceRegistration(typeof(ITrieNodeFactory), nodeFactory));
+
+                return this;
+            }
+
+            /// <summary>
+            /// Configures the bootstrapper to create an <see cref="ITrieNodeFactory"/> instance of the specified type.
+            /// </summary>
+            /// <typeparam name="T">The type of the <see cref="ITrieNodeFactory"/> that the bootstrapper should use.</typeparam>
+            /// <returns>A reference to the current <see cref="ConfigurableBootstrapperConfigurator"/>.</returns>
+            public ConfigurableBootstrapperConfigurator TrieNodeFactory<T>() where T : ITrieNodeFactory
+            {
+                this.bootstrapper.configuration.TrieNodeFactory = typeof(T);
+                return this;
+            }
+
+            public ConfigurableBootstrapperConfigurator ApplicationStartup(Action<TinyIoCContainer, IPipelines> action)
+            {
+                this.bootstrapper.applicationStartupActions.Add(action);
+                return this;
+            }
+
+            public ConfigurableBootstrapperConfigurator RequestStartup(Action<TinyIoCContainer, IPipelines, NancyContext> action)
+            {
+                this.bootstrapper.requestStartupActions.Add(action);
                 return this;
             }
         }
 
         /// <summary>
-        /// Provides the functionality to register <see cref="NancyModule"/> instances in a <see cref="INancyModuleCatalog"/>.
+        /// Provides the functionality to register <see cref="INancyModule"/> instances in a <see cref="INancyModuleCatalog"/>.
         /// </summary>
         public class ConfigurableModuleCatalog : INancyModuleCatalog
         {
-            private readonly IDictionary<string, NancyModule> moduleInstances;
+            private readonly IDictionary<string, INancyModule> moduleInstances;
 
             /// <summary>
             /// Initializes a new instance of the <see cref="ConfigurableModuleCatalog"/> class.
             /// </summary>
             public ConfigurableModuleCatalog()
             {
-                this.moduleInstances = new Dictionary<string, NancyModule>();
+                this.moduleInstances = new Dictionary<string, INancyModule>();
             }
 
             /// <summary>
             /// Get all NancyModule implementation instances - should be per-request lifetime
             /// </summary>
             /// <param name="context">The current context</param>
-            /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="NancyModule"/> instances.</returns>
-            public IEnumerable<NancyModule> GetAllModules(NancyContext context)
+            /// <returns>An <see cref="IEnumerable{T}"/> instance containing <see cref="INancyModule"/> instances.</returns>
+            public IEnumerable<INancyModule> GetAllModules(NancyContext context)
             {
                 return this.moduleInstances.Values;
             }
 
             /// <summary>
-            /// Retrieves a specific <see cref="NancyModule"/> implementation based on its key - should be per-request lifetime
+            /// Retrieves a specific <see cref="INancyModule"/> implementation - should be per-request lifetime
             /// </summary>
-            /// <param name="moduleKey">Module key</param>
+            /// <param name="moduleType">Module type</param>
             /// <param name="context">The current context</param>
-            /// <returns>The <see cref="NancyModule"/> instance that was retrived by the <paramref name="moduleKey"/> parameter.</returns>
-            public NancyModule GetModuleByKey(string moduleKey, NancyContext context)
+            /// <returns>The <see cref="INancyModule"/> instance</returns>
+            public INancyModule GetModule(Type moduleType, NancyContext context)
             {
-                return this.moduleInstances.ContainsKey(moduleKey) ? this.moduleInstances[moduleKey] : null;
+                return this.moduleInstances.ContainsKey(moduleType.FullName) ? this.moduleInstances[moduleType.FullName] : null;
             }
 
             /// <summary>
-            /// Registers a <see cref="NancyModule"/> instance, with the specified <paramref name="moduleKey"/> value.
+            /// Registers a <see cref="INancyModule"/> instance, with the specified <paramref name="moduleKey"/> value.
             /// </summary>
-            /// <param name="module">The <see cref="NancyModule"/> instance to register.</param>
-            /// <param name="moduleKey">The module key of the module that is being registered.</param>
-            public void RegisterModuleInstance(NancyModule module, string moduleKey)
+            /// <param name="module">The <see cref="INancyModule"/> instance to register.</param>
+            public void RegisterModuleInstance(INancyModule module)
             {
-                this.moduleInstances.Add(moduleKey, module);
+                this.moduleInstances.Add(module.GetType().FullName, module);
             }
         }
     }

@@ -4,19 +4,29 @@ namespace Nancy.Hosting.Aspnet
     using System.Globalization;
     using System.Linq;
     using System.Web;
-    using Bootstrapper;
     using IO;
     using Nancy.Extensions;
 
+    /// <summary>
+    /// Bridges the communication between Nancy and ASP.NET based hosting.
+    /// </summary>
     public class NancyHandler
     {        
         private readonly INancyEngine engine;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NancyHandler"/> type for the specified <paramref name="engine"/>.
+        /// </summary>
+        /// <param name="engine">An <see cref="INancyEngine"/> instance, that should be used by the handler.</param>
         public NancyHandler(INancyEngine engine)
         {
             this.engine = engine;
         }
 
+        /// <summary>
+        /// Processes the ASP.NET request with Nancy.
+        /// </summary>
+        /// <param name="context">The <see cref="HttpContextBase"/> of the request.</param>
         public void ProcessRequest(HttpContextBase context)
         {
             var request = CreateNancyRequest(context);
@@ -29,16 +39,23 @@ namespace Nancy.Hosting.Aspnet
 
         private static Request CreateNancyRequest(HttpContextBase context)
         {
+            var incomingHeaders = context.Request.Headers.ToDictionary();
+
             var expectedRequestLength =
-                GetExpectedRequestLength(context.Request.Headers.ToDictionary());
+                GetExpectedRequestLength(incomingHeaders);
+
+            var basePath = context.Request.ApplicationPath.TrimEnd('/');
+
+            var path = context.Request.Url.AbsolutePath.Substring(basePath.Length);
+            path = string.IsNullOrWhiteSpace(path) ? "/" : path;
 
             var nancyUrl = new Url
                                {
                                    Scheme = context.Request.Url.Scheme,
                                    HostName = context.Request.Url.Host,
                                    Port = context.Request.Url.Port,
-                                   BasePath = context.Request.ApplicationPath.TrimEnd('/'),
-                                   Path = context.Request.AppRelativeCurrentExecutionFilePath.Replace("~", string.Empty),
+                                   BasePath = basePath,
+                                   Path = path,
                                    Query = context.Request.Url.Query,
                                    Fragment = context.Request.Url.Fragment,
                                };
@@ -47,7 +64,7 @@ namespace Nancy.Hosting.Aspnet
                 context.Request.HttpMethod.ToUpperInvariant(),
                 nancyUrl,
                 RequestStream.FromStream(context.Request.InputStream, expectedRequestLength, true),
-                context.Request.Headers.ToDictionary(),
+                incomingHeaders,
                 context.Request.UserHostAddress);
         }
 
@@ -84,19 +101,22 @@ namespace Nancy.Hosting.Aspnet
         {
             SetHttpResponseHeaders(context, response);
 
-            context.Response.ContentType = response.ContentType;
+            if (response.ContentType != null)
+            {
+                context.Response.ContentType = response.ContentType;
+            }
             context.Response.StatusCode = (int)response.StatusCode;
             response.Contents.Invoke(context.Response.OutputStream);         
         }
 
         private static void SetHttpResponseHeaders(HttpContextBase context, Response response)
         {
-            foreach (var header in response.Headers)
+            foreach (var header in response.Headers.ToDictionary(x => x.Key, x => x.Value))
             {
                 context.Response.AddHeader(header.Key, header.Value);
             }
 
-            foreach(var cookie in response.Cookies)
+            foreach(var cookie in response.Cookies.ToArray())
             {
                 context.Response.AddHeader("Set-Cookie", cookie.ToString());
             }

@@ -1,21 +1,25 @@
 namespace Nancy.Tests.Unit.ViewEngines
 {
+    using System.Collections.Generic;
+
+    using FakeItEasy;
+
     using Fakes;
     using Nancy.ViewEngines;
     using Xunit;
     using Xunit.Extensions;
 
+    using System.Linq;
+
     public class DefaultViewLocatorFixture
     {
-        private readonly IViewLocationCache viewLocationCache;
         private readonly ViewLocationResult viewLocation;
         private readonly DefaultViewLocator viewLocator;
 
         public DefaultViewLocatorFixture()
         {
             this.viewLocation = new ViewLocationResult("location", "view", "html", null);
-            this.viewLocationCache = new FakeViewLocationCache(this.viewLocation);
-            this.viewLocator = CreateViewLocator(this.viewLocationCache);
+            this.viewLocator = CreateViewLocator();
         }
 
         [Fact]
@@ -25,7 +29,7 @@ namespace Nancy.Tests.Unit.ViewEngines
             string viewName = null;
 
             // When
-            var result = this.viewLocator.LocateView(viewName);
+            var result = this.viewLocator.LocateView(viewName, null);
 
             // Then
             result.ShouldBeNull();
@@ -38,7 +42,7 @@ namespace Nancy.Tests.Unit.ViewEngines
             var viewName = string.Empty;
 
             // When
-            var result = this.viewLocator.LocateView(viewName);
+            var result = this.viewLocator.LocateView(viewName, null);
 
             // Then
             result.ShouldBeNull();
@@ -49,12 +53,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", string.Empty, () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("index");
+            var result = locator.LocateView("index", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -67,11 +70,10 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", string.Empty, () => null);
-            var cache = new FakeViewLocationCache(expectedView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView(viewName);
+            var result = locator.LocateView(viewName, null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -83,11 +85,10 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView1 = new ViewLocationResult(string.Empty, "index", string.Empty, () => null);
             var expectedView2 = new ViewLocationResult(string.Empty, "index", string.Empty, () => null);
-            var cache = new FakeViewLocationCache(expectedView1, expectedView2);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView1, expectedView2);
 
             // When
-            var exception = Record.Exception(() => locator.LocateView("index"));
+            var exception = Record.Exception(() => locator.LocateView("index", null));
 
             // Then
             exception.ShouldBeOfType<AmbiguousViewsException>();
@@ -99,11 +100,10 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView1 = new ViewLocationResult(string.Empty, "index", "spark", () => null);
             var expectedView2 = new ViewLocationResult(string.Empty, "index", "html", () => null);
-            var cache = new FakeViewLocationCache(expectedView1, expectedView2);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView1, expectedView2);
 
             // When
-            var exception = Record.Exception(() => locator.LocateView("index"));
+            var exception = Record.Exception(() => locator.LocateView("index", null));
 
             // Then
             exception.ShouldBeOfType<AmbiguousViewsException>();
@@ -115,13 +115,12 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView1 = new ViewLocationResult(string.Empty, "index", "spark", () => null);
             var expectedView2 = new ViewLocationResult(string.Empty, "index", "html", () => null);
-            var cache = new FakeViewLocationCache(expectedView1, expectedView2);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView1, expectedView2);
 
             const string expectedMessage = "This exception was thrown because multiple views were found. 2 view(s):\r\n\t/index.spark\r\n\t/index.html";
 
             // When
-            var exception = Record.Exception(() => locator.LocateView("index"));
+            var exception = Record.Exception(() => locator.LocateView("index", null));
 
             // Then
             exception.Message.ShouldEqual(expectedMessage);
@@ -132,12 +131,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", string.Empty, () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("main");
+            var result = locator.LocateView("main", null);
 
             // Then
             result.ShouldBeNull();
@@ -148,12 +146,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", "cshtml", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("index.cshtml");
+            var result = locator.LocateView("index.cshtml", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -166,11 +163,10 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", "cshtml", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView(viewName);
+            var result = locator.LocateView(viewName, null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -181,12 +177,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult(string.Empty, "index", "spark", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("index.cshtml");
+            var result = locator.LocateView("index.cshtml", null);
 
             // Then
             result.ShouldBeNull();
@@ -197,12 +192,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult("views/sub", "index", "cshtml", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("views/sub/index.cshtml");
+            var result = locator.LocateView("views/sub/index.cshtml", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -215,11 +209,10 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult("views/sub", "index", "cshtml", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView(viewName);
+            var result = locator.LocateView(viewName, null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -230,12 +223,11 @@ namespace Nancy.Tests.Unit.ViewEngines
         {
             // Given
             var expectedView = new ViewLocationResult("views/sub", "index", "spark", () => null);
-            var cache = new FakeViewLocationCache(expectedView);
 
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView);
 
             // When
-            var result = locator.LocateView("views/feature/index.cshtml");
+            var result = locator.LocateView("views/feature/index.cshtml", null);
 
             // Then
             result.ShouldBeNull();
@@ -247,11 +239,10 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView = new ViewLocationResult("views/sub", "index", string.Empty, () => null);
             var additionalView = new ViewLocationResult("views", "index", string.Empty, () => null);
-            var cache = new FakeViewLocationCache(expectedView, additionalView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView, additionalView);
 
             // When
-            var result = locator.LocateView("views/sub/index");
+            var result = locator.LocateView("views/sub/index", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -263,11 +254,10 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView = new ViewLocationResult("views", "index", "cshtml", () => null);
             var additionalView = new ViewLocationResult("views", "index", "spark", () => null);
-            var cache = new FakeViewLocationCache(expectedView, additionalView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView, additionalView);
 
             // When
-            var result = locator.LocateView("views/index.cshtml");
+            var result = locator.LocateView("views/index.cshtml", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
@@ -279,19 +269,66 @@ namespace Nancy.Tests.Unit.ViewEngines
             // Given
             var expectedView = new ViewLocationResult("views/sub", "index", "cshtml", () => null);
             var additionalView = new ViewLocationResult("views", "index", "spark", () => null);
-            var cache = new FakeViewLocationCache(expectedView, additionalView);
-            var locator = CreateViewLocator(cache);
+            var locator = CreateViewLocator(expectedView, additionalView);
 
             // When
-            var result = locator.LocateView("views/sub/index.cshtml");
+            var result = locator.LocateView("views/sub/index.cshtml", null);
 
             // Then
             result.ShouldBeSameAs(expectedView);
         }
 
-        private static DefaultViewLocator CreateViewLocator(IViewLocationCache viewLocationCache)
+        [Fact]
+        public void Should_be_able_to_locate_view_by_name_when_the_viewname_occures_in_the_location()
         {
-            return new DefaultViewLocator(viewLocationCache);
+           // Given
+           var expectedView = new ViewLocationResult( "views/hello", "hello", "cshtml", () => null );
+           //var additionalView = new ViewLocationResult( "views", "index", "spark", () => null );
+           var locator = CreateViewLocator(expectedView);
+
+           // When
+           var result = locator.LocateView( "views/hello/hello", null );
+
+           // Then
+           result.ShouldBeSameAs( expectedView );
+        }
+
+        [Fact]
+        public void Should_get_located_views_from_view_location_providers_with_available_extensions_when_created()
+        {
+            // Given
+            var viewEngine1 = A.Fake<IViewEngine>();
+            A.CallTo(() => viewEngine1.Extensions).Returns(new[] { "html" });
+
+            var viewEngine2 = A.Fake<IViewEngine>();
+            A.CallTo(() => viewEngine2.Extensions).Returns(new[] { "spark" });
+
+            var viewLocationProvider = A.Fake<IViewLocationProvider>();
+            var expectedViewEngineExtensions = new[] { "html", "spark" };
+            var viewEngine = A.Fake<IViewEngine>();
+            A.CallTo(() => viewEngine.Extensions).Returns(expectedViewEngineExtensions);
+
+            // When
+            new DefaultViewLocator(viewLocationProvider, new[] { viewEngine });
+
+            // Then
+            A.CallTo(() => viewLocationProvider.GetLocatedViews(A<IEnumerable<string>>.That.Matches(
+                    x => x.All(expectedViewEngineExtensions.Contains)))).MustHaveHappened();
+        }
+
+
+        private static DefaultViewLocator CreateViewLocator(params ViewLocationResult[] results)
+        {
+            var viewLocationProvider = A.Fake<IViewLocationProvider>();
+            A.CallTo(() => viewLocationProvider.GetLocatedViews(A<IEnumerable<string>>._))
+                                               .Returns(results);
+
+            var viewEngine = A.Fake<IViewEngine>();
+            A.CallTo(() => viewEngine.Extensions).Returns(new[] { "liquid" });
+
+            var viewLocator = new DefaultViewLocator(viewLocationProvider, new[] { viewEngine });
+
+            return viewLocator;
         }
     }
 }

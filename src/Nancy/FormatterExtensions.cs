@@ -2,10 +2,10 @@ namespace Nancy
 {
     using System;
     using System.Linq;
+    using System.IO;
 
     using Extensions;
     using Nancy.Responses;
-    using System.IO;
 
     public static class FormatterExtensions
     {
@@ -23,6 +23,17 @@ namespace Nancy
             return new GenericFileResponse(applicationRelativeFilePath);
         }
 
+        public static Response AsText(this IResponseFormatter formatter, string contents, string contentType)
+        {
+            return new TextResponse(contents, contentType);
+        }
+
+        public static Response AsText(this IResponseFormatter formatter, string contents)
+        {
+            return new TextResponse(contents);
+        }
+
+        [Obsolete("Consider serving static content using the static content conventions instead.")]
         public static Response AsCss(this IResponseFormatter formatter, string applicationRelativeFilePath)
         {
             return AsFile(formatter, applicationRelativeFilePath);
@@ -33,6 +44,7 @@ namespace Nancy
             return AsFile(formatter, applicationRelativeFilePath);
         }
 
+        [Obsolete("Consider serving static content using the static content conventions instead.")]
         public static Response AsJs(this IResponseFormatter formatter, string applicationRelativeFilePath)
         {
             return AsFile(formatter, applicationRelativeFilePath);

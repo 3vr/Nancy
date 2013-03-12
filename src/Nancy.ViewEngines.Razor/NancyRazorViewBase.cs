@@ -3,18 +3,46 @@
     using System;
     using System.Collections.Generic;
     using System.Globalization;
+    using System.IO;
     using System.Text;
-
     using Nancy.Helpers;
+
+    /// <summary>
+    /// Default base class for nancy razor views
+    /// </summary>
+    public abstract class NancyRazorViewBase : NancyRazorViewBase<dynamic>
+    {
+    }
 
     /// <summary>
     /// Base class for nancy razor views.
     /// </summary>
-    public abstract class NancyRazorViewBase
+    /// <typeparam name="TModel">Model type</typeparam>
+    public abstract class NancyRazorViewBase<TModel> : INancyRazorView
     {
         private readonly StringBuilder contents;
         private string childBody;
         private IDictionary<string, string> childSections;
+
+        /// <summary>
+        /// Gets the Html helper.
+        /// </summary>
+        public HtmlHelpers<TModel> Html { get; private set; }
+
+        /// <summary>
+        /// Gets the model.
+        /// </summary>
+        public TModel Model { get; private set; }
+
+        /// <summary>
+        /// Gets the Url helper.
+        /// </summary>
+        public UrlHelpers<TModel> Url { get; private set; }
+
+        /// <summary>
+        /// Non-model specific data for rendering in the response
+        /// </summary>
+        public dynamic ViewBag { get; private set; }
 
         /// <summary>
         /// Gets the body.
@@ -45,10 +73,7 @@
         /// </value>
         public bool HasLayout
         {
-            get
-            {
-                return !String.IsNullOrEmpty(this.Layout);
-            }
+            get { return !String.IsNullOrEmpty(this.Layout); }
         }
 
         /// <summary>
@@ -76,6 +101,17 @@
         public IDictionary<string, Action> Sections { get; set; }
 
         /// <summary>
+        /// Used to retun text resources
+        /// </summary>
+        public dynamic Text
+        {
+            get
+            {
+                return this.RenderContext.TextResourceFinder;
+            }
+        }
+
+        /// <summary>
         /// Executes the view.
         /// </summary>
         public abstract void Execute();
@@ -87,7 +123,15 @@
         /// <param name="renderContext">The render context.</param>
         /// <param name="model">The model.</param>
         public virtual void Initialize(RazorViewEngine engine, IRenderContext renderContext, object model)
-        { }
+        {
+            this.RenderContext = renderContext;
+            this.Html = new HtmlHelpers<TModel>(engine, renderContext, (TModel)model);
+            this.Model = (TModel)model;
+            this.Url = new UrlHelpers<TModel>(engine, renderContext);
+            this.ViewBag = renderContext.Context.ViewBag;
+        }
+
+        protected IRenderContext RenderContext { get; set; }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NancyRazorViewBase"/> class.
@@ -114,6 +158,137 @@
         public virtual void WriteLiteral(object value)
         {
             contents.Append(value);
+        }
+
+        public virtual void WriteAttribute(string name, Tuple<string, int> prefix, Tuple<string, int> suffix, params AttributeValue[] values)
+        {
+            var attributeValue = this.BuildAttribute(name, prefix, suffix, values);
+            this.WriteLiteral(attributeValue);
+        }
+
+        public virtual void WriteAttributeTo(TextWriter writer, string name, Tuple<string, int> prefix, Tuple<string, int> suffix, params AttributeValue[] values)
+        {
+            var attributeValue = this.BuildAttribute(name, prefix, suffix, values);
+            this.WriteLiteralTo(writer, attributeValue);
+        }
+
+        private string BuildAttribute(string name, Tuple<string, int> prefix, Tuple<string, int> suffix,
+                                      params AttributeValue[] values)
+        {
+            var writtenAttribute = false;
+            var attributeBuilder = new StringBuilder(prefix.Item1);
+
+            foreach (var value in values)
+            {
+                if (this.ShouldWriteValue(value.Value.Item1))
+                {
+                    var stringValue = this.GetStringValue(value);
+                    var valuePrefix = value.Prefix.Item1;
+
+                    if (!string.IsNullOrEmpty(valuePrefix))
+                    {
+                        attributeBuilder.Append(valuePrefix);
+                    }
+
+                    attributeBuilder.Append(stringValue);
+                    writtenAttribute = true;
+                }
+            }
+
+            attributeBuilder.Append(suffix.Item1);
+
+            var renderAttribute = writtenAttribute || values.Length == 0;
+
+            if (renderAttribute)
+            {
+                return attributeBuilder.ToString();
+            }
+
+            return string.Empty;
+        }
+
+        private string GetStringValue(AttributeValue value)
+        {
+            if (value.IsLiteral)
+            {
+                return (string)value.Value.Item1;
+            }
+
+            if (value.Value.Item1 is IHtmlString)
+            {
+                return ((IHtmlString)value.Value.Item1).ToHtmlString();
+            }
+
+            if (value.Value.Item1 is DynamicDictionaryValue)
+            {
+                var dynamicValue = (DynamicDictionaryValue)value.Value.Item1;
+                return dynamicValue.HasValue ? dynamicValue.Value.ToString() : string.Empty;
+            }
+
+            return value.Value.Item1.ToString();
+        }
+
+        private bool ShouldWriteValue(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            if (value is bool)
+            {
+                var boolValue = (bool) value;
+
+                return boolValue;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Writes the provided <paramref name="value"/> to the provided <paramref name="writer"/>.
+        /// </summary>
+        /// <param name="writer">The <see cref="TextWriter"/> that should be written to.</param>
+        /// <param name="value">The value that should be written.</param>
+        public virtual void WriteTo(TextWriter writer, object value)
+        {
+            writer.Write(HtmlEncode(value));
+        }
+
+        /// <summary>
+        /// Writes the provided <paramref name="value"/>, as a literal, to the provided <paramref name="writer"/>.
+        /// </summary>
+        /// <param name="writer">The <see cref="TextWriter"/> that should be written to.</param>
+        /// <param name="value">The value that should be written as a literal.</param>
+        public virtual void WriteLiteralTo(TextWriter writer, object value)
+        {
+            writer.Write(value);
+        }
+
+        /// <summary>
+        /// Writes the provided <paramref name="value"/> to the provided <paramref name="writer"/>.
+        /// </summary>
+        /// <param name="writer">The <see cref="TextWriter"/> that should be written to.</param>
+        /// <param name="value">The <see cref="HelperResult"/> that should be written.</param>
+        public virtual void WriteTo(TextWriter writer, HelperResult value)
+        {
+            if (value != null)
+            {
+                value.WriteTo(writer);
+            }
+        }
+
+        /// <summary>
+        /// Writes the provided <paramref name="value"/>, as a literal, to the provided <paramref name="writer"/>.
+        /// </summary>
+        /// <param name="writer">The <see cref="TextWriter"/> that should be written to.</param>
+        /// <param name="value">The <see cref="HelperResult"/> that should be written as a literal.</param>
+        public virtual void WriteLiteralTo(TextWriter writer, HelperResult value)
+        {
+            if (value != null)
+            {
+                value.WriteTo(writer);
+            }
         }
 
         /// <summary>
@@ -175,6 +350,11 @@
             return this.childSections.ContainsKey(sectionName);
         }
 
+        public virtual string ResolveUrl(string url)
+        {
+            return this.RenderContext.ParsePath(url);
+        }
+
         /// <summary>
         /// Executes the view.
         /// </summary>
@@ -185,7 +365,14 @@
             this.childBody = body ?? string.Empty;
             this.childSections = sectionContents ?? new Dictionary<string, string>();
 
-            this.Execute();
+            try
+            {
+                this.Execute();
+            }
+            catch (NullReferenceException)
+            {
+                throw new ViewRenderException("Unable to render the view.  Most likely the Model, or a property on the Model, is null");
+            }
 
             this.Body = this.contents.ToString();
 
@@ -193,7 +380,14 @@
             foreach (var section in this.Sections)
             {
                 this.contents.Clear();
-                section.Value.Invoke();
+                try
+                {
+                    section.Value.Invoke();
+                }
+                catch (NullReferenceException)
+                {
+                    throw new ViewRenderException(string.Format("A null reference was encountered while rendering the section {0}.  Does the section require a model? (maybe it wasn't passed in)", section.Key));
+                }
                 this.SectionContents.Add(section.Key, this.contents.ToString());
             }
         }
@@ -213,41 +407,6 @@
             var str = value as IHtmlString;
 
             return str != null ? str.ToHtmlString() : HttpUtility.HtmlEncode(Convert.ToString(value, CultureInfo.CurrentCulture));
-        }
-    }
-
-    /// <summary>
-    /// A strongly-typed view base.
-    /// </summary>
-    /// <typeparam name="TModel">The type of the model.</typeparam>
-    public abstract class NancyRazorViewBase<TModel> : NancyRazorViewBase
-    {
-        /// <summary>
-        /// Gets the Html helper.
-        /// </summary>
-        public IHtmlHelpers<TModel> Html { get; private set; }
-
-        /// <summary>
-        /// Gets the model.
-        /// </summary>
-        public TModel Model { get; private set; }
-
-        /// <summary>
-        /// Gets the Url helper.
-        /// </summary>
-        public IUrlHelpers<TModel> Url { get; private set; }
-
-        /// <summary>
-        /// Initializes the specified engine.
-        /// </summary>
-        /// <param name="engine">The engine.</param>
-        /// <param name="renderContext">The render context.</param>
-        /// <param name="model">The model.</param>
-        public override void Initialize(RazorViewEngine engine, IRenderContext renderContext, object model)
-        {
-            Html = new HtmlHelpers<TModel>(engine, renderContext, (TModel)model);
-            Model = (TModel)model;
-            Url = new UrlHelpers<TModel>(engine, renderContext);
         }
     }
 }

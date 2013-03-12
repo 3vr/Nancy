@@ -3,6 +3,8 @@
     using System.Web.Razor;
     using System.Web.Razor.Generator;
     using System.Web.Razor.Parser;
+    using CSharp;
+    using VisualBasic;
 
     /// <summary>
     /// A custom razor engine host responsible for decorating the existing code generators with nancy versions.
@@ -20,22 +22,10 @@
             this.DefaultNamespace = "RazorOutput";
             this.DefaultClassName = "RazorView";
 
-            this.GeneratedClassContext = new GeneratedClassContext("Execute", "Write", "WriteLiteral", null, null, null, "DefineSection");
-		}
+            var context = new GeneratedClassContext("Execute", "Write", "WriteLiteral", "WriteTo", "WriteLiteralTo", typeof(HelperResult).FullName, "DefineSection");
+            context.ResolveUrlMethodName = "ResolveUrl";
 
-        /// <summary>
-        /// Decorates the code generator.
-        /// </summary>
-        /// <param name="incomingCodeGenerator">The incoming code generator.</param>
-        /// <returns></returns>
-		public override RazorCodeGenerator DecorateCodeGenerator(RazorCodeGenerator incomingCodeGenerator)
-		{
-			if (incomingCodeGenerator is CSharpRazorCodeGenerator)
-				return new CSharp.NancyCSharpRazorCodeGenerator(incomingCodeGenerator.ClassName, incomingCodeGenerator.RootNamespaceName, incomingCodeGenerator.SourceFileName, incomingCodeGenerator.Host);
-            if (incomingCodeGenerator is VBRazorCodeGenerator)
-                return new VisualBasic.NancyVisualBasicRazorCodeGenerator(incomingCodeGenerator.ClassName, incomingCodeGenerator.RootNamespaceName, incomingCodeGenerator.SourceFileName, incomingCodeGenerator.Host);
-
-            return base.DecorateCodeGenerator(incomingCodeGenerator);
+            this.GeneratedClassContext = context;
 		}
 
         /// <summary>
@@ -46,9 +36,14 @@
 		public override ParserBase DecorateCodeParser(ParserBase incomingCodeParser)
 		{
 			if (incomingCodeParser is CSharpCodeParser)
-                return new CSharp.NancyCSharpRazorCodeParser();
+			{
+			    return new NancyCSharpRazorCodeParser();
+			}
+
             if (incomingCodeParser is VBCodeParser)
-                return new VisualBasic.NancyVisualBasicRazorCodeParser();
+            {
+                return new NancyVisualBasicRazorCodeParser();
+            }
 
 			return base.DecorateCodeParser(incomingCodeParser);
 		}

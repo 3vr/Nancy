@@ -3,6 +3,7 @@ require 'rubygems'
 require 'albacore'
 require 'rake/clean'
 require 'rexml/document'
+require './customassemblyinfo'
 
 OUTPUT = "build"
 CONFIGURATION = 'Release'
@@ -44,7 +45,6 @@ task :assembly_info do
   puts "Main project does not update assembly info"
 end
 
-
 desc "Compile solution file"
 msbuild :compile => [:assembly_info] do |msb|
     msb.properties :configuration => CONFIGURATION
@@ -54,17 +54,20 @@ end
 
 desc "Compile solution file for Mono"
 xbuild :compilemono => [:assembly_info] do |xb|
-    xb.properties :configuration => CONFIGURATIONMONO
     xb.solution = SOLUTION_FILE
+    xb.properties = { :configuration => CONFIGURATIONMONO, "TargetFrameworkProfile" => "", "TargetFrameworkVersion" => "v4.0" }
 end
 
 
 desc "Gathers output files and copies them to the output folder"
 task :publish => [:compile] do
-    Dir.mkdir(OUTPUT)
-    Dir.mkdir("#{OUTPUT}/binaries")
 
-    FileUtils.cp_r FileList["src/**/#{CONFIGURATION}/*.dll", "src/**/#{CONFIGURATION}/*.pdb", "src/**/*.ps1"].exclude(/obj\//).exclude(/.Tests/), "#{OUTPUT}/binaries"
+    output = "#{OUTPUT}/binaries"
+    if not File.directory? output
+        mkpath(output)
+    end
+
+    FileUtils.cp_r FileList["src/**/#{CONFIGURATION}/*.dll", "src/**/#{CONFIGURATION}/*.pdb", "src/**/*.ps1"].exclude(/obj\//).exclude(/.Tests/), output
 end
 
 desc "Executes MSpec tests"
@@ -77,7 +80,7 @@ end
 
 desc "Executes xUnit tests"
 xunit :xunit => [:compile] do |xunit|
-    tests = FileList["src/**/#{CONFIGURATION}/*.Tests.dll"].exclude(/obj\//)
+    tests = FileList["src/**/#{CONFIGURATION}/*.Tests*.dll"].exclude(/obj\//).exclude(/Nancy.ViewEngines.Razor.Tests.Models/)
 
     xunit.command = "tools/xunit/xunit.console.clr4.x86.exe"
     xunit.assemblies = tests
@@ -85,7 +88,7 @@ end
 
 desc "Executes xUnit tests using Mono"
 xunit :xunitmono => [] do |xunit|
-    tests = FileList["src/**/#{CONFIGURATIONMONO}/*.Tests.dll"].exclude(/obj\//)
+    tests = FileList["src/**/#{CONFIGURATIONMONO}/*.Tests*.dll"].exclude(/obj\//).exclude(/Nancy.ViewEngines.Razor.Tests.Models/)
 
     xunit.command = "tools/xunit/xunitmono.sh"
     xunit.assemblies = tests
@@ -93,16 +96,29 @@ end
 
 desc "Zips up the built binaries for easy distribution"
 zip :package => [:publish] do |zip|
-    Dir.mkdir("#{OUTPUT}/packages")
+    if not File.directory? "#{OUTPUT}/packages"
+        Dir.mkdir("#{OUTPUT}/packages")
+    end
 
     zip.directories_to_zip "#{OUTPUT}/binaries"
     zip.output_file = "Nancy-Latest.zip"
     zip.output_path = "#{OUTPUT}/packages"
 end
 
+desc "Deletes symbol packages"
+task :nuget_nuke_symbol_packages do
+  nupkgs = FileList['**/*.Symbols.nupkg']
+  nupkgs.each do |nupkg|
+    puts "Deleting #{nupkg}"
+    FileUtils.rm(nupkg)
+  end
+end
+
 desc "Generates NuGet packages for each project that contains a nuspec"
 task :nuget_package => [:publish] do
-    Dir.mkdir("#{OUTPUT}/nuget")
+    if not File.directory? "#{OUTPUT}/nuget"
+        Dir.mkdir("#{OUTPUT}/nuget")
+    end
     nuspecs = FileList["src/**/*.nuspec"]
     root = File.dirname(__FILE__)
 
@@ -112,13 +128,14 @@ task :nuget_package => [:publish] do
 
     # Update the copied *.nuspec files to correct version numbers and other common values
     nuspecs.each do |nuspec|
+        puts "Updating #{nuspec}"
         update_xml nuspec do |xml|
             # Override the version number in the nuspec file with the one from this rake file (set above)
             xml.root.elements["metadata/version"].text = $nancy_version
 			
 			# Override the Nancy dependencies to match this version
             nancy_dependencies = xml.root.elements["metadata/dependencies/dependency[contains(@id,'Nancy')]"]
-            nancy_dependencies.attributes["version"] = "[#{$nancy_version}]" unless nancy_dependencies.nil?
+            nancy_dependencies.attributes["version"] = "#{$nancy_version}" unless nancy_dependencies.nil?
 
             # Override common values
             xml.root.elements["metadata/authors"].text = "Andreas Håkansson, Steven Robbins and contributors"
@@ -153,10 +170,33 @@ task :nuget_publish, :api_key do |task, args|
     end
 end
 
+desc "Pushes the nuget packages in the nuget folder up to the specified feed"
+task :nuget_publish_alt, :api_key, :source do |task, args|
+    raise "Missing source" if args.source.nil?
+    nupkgs = FileList["#{OUTPUT}/nuget/*#{$nancy_version}.nupkg"]
+    nupkgs.each do |nupkg| 
+        puts "Pushing #{nupkg} to {#args.source}"
+        nuget_push = NuGetPush.new
+        nuget_push.apikey = args.api_key if !args.empty?
+        nuget_push.command = "tools/nuget/nuget.exe"
+        nuget_push.package = "\"" + nupkg + "\""
+        nuget_push.source = args.source
+        nuget_push.create_only = false
+        nuget_push.execute
+    end
+end
+
 desc "Updates the SharedAssemblyInfo version"
-assemblyinfo :update_version, :assembly_info do |asm, args|
+assemblyinfo :update_version, [:version] do |asm, args|
     asm.input_file = SHARED_ASSEMBLY_INFO
     asm.version = args.version if !args.version.nil?
+    asm.output_file = SHARED_ASSEMBLY_INFO
+end
+
+desc "Updates the SharedAssemblyInfo informational version"
+customassemblyinfo :update_informational_version, [:version] do |asm, args|
+    asm.input_file = SHARED_ASSEMBLY_INFO
+    asm.assembly_informational_version = args.version if !args.version.nil?
     asm.output_file = SHARED_ASSEMBLY_INFO
 end
 
@@ -201,7 +241,7 @@ def get_assembly_version(file)
 
   File.open(file, 'r') do |file|
     file.each_line do |line|
-      result = /\[assembly: AssemblyVersion\(\"(.*?)\"\)\]/.match(line)
+      result = /\[assembly: AssemblyInformationalVersion\(\"(.*?)\"\)\]/.match(line)
 
       return result[1] if !result.nil?
     end
@@ -212,6 +252,7 @@ end
 
 $nancy_version = get_assembly_version SHARED_ASSEMBLY_INFO
 puts "Version: #{$nancy_version}"
+
 #TODO:
 #-----
 #  8. Git info into shared assemby info (see fubumvc sample, also psake sample in mefcontrib)

@@ -1,11 +1,14 @@
-﻿namespace Nancy.Routing
+﻿using Nancy.Extensions;
+using Nancy.Responses.Negotiation;
+
+namespace Nancy.Routing
 {
     using ModelBinding;
     using Nancy.ViewEngines;
     using Nancy.Validation;
 
     /// <summary>
-    /// Default implementation for building a full configured <see cref="NancyModule"/> instance.
+    /// Default implementation for building a full configured <see cref="INancyModule"/> instance.
     /// </summary>
     public class DefaultNancyModuleBuilder : INancyModuleBuilder
     {
@@ -30,13 +33,15 @@
         }
 
         /// <summary>
-        /// Builds a fully configured <see cref="NancyModule"/> instance, based upon the provided <paramref name="module"/>.
+        /// Builds a fully configured <see cref="INancyModule"/> instance, based upon the provided <paramref name="module"/>.
         /// </summary>
-        /// <param name="module">The <see cref="NancyModule"/> that shoule be configured.</param>
+        /// <param name="module">The <see cref="INancyModule"/> that shoule be configured.</param>
         /// <param name="context">The current request context.</param>
-        /// <returns>A fully configured <see cref="NancyModule"/> instance.</returns>
-        public NancyModule BuildModule(NancyModule module, NancyContext context)
+        /// <returns>A fully configured <see cref="INancyModule"/> instance.</returns>
+        public INancyModule BuildModule(INancyModule module, NancyContext context)
         {
+            CreateNegotiationContext(module, context);
+
             module.Context = context;
             module.Response = this.responseFormatterFactory.Create(context);
             module.ViewFactory = this.viewFactory;
@@ -44,6 +49,16 @@
             module.ValidatorLocator = this.validatorLocator;
 
             return module;
+        }
+
+        private static void CreateNegotiationContext(INancyModule module, NancyContext context)
+        {
+            // TODO - not sure if this should be here or not, but it'll do for now :)
+            context.NegotiationContext = new NegotiationContext
+                                             {
+                                                 ModuleName = module.GetModuleName(),
+                                                 ModulePath = module.ModulePath,
+                                             };
         }
     }
 }

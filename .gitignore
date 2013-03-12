@@ -18,3 +18,9 @@ build/
 _[Rr]e[Ss]harper.*/
 *.docstates
 *.tss
+*.ncrunchproject
+*.ncrunchsolution
+*.dotCover
+src/_NCrunch_Nancy/
+Thumbs.db
+.idea

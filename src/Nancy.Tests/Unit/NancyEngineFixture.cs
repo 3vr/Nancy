@@ -1,9 +1,6 @@
 namespace Nancy.Tests.Unit
 {
     using System;
-    using System.Collections.Generic;
-    using System.Linq;
-    using Diagnostics;
     using FakeItEasy;
     using Nancy.Bootstrapper;
     using Nancy.Diagnostics;
@@ -12,7 +9,7 @@ namespace Nancy.Tests.Unit
     using Nancy.Routing;
     using Nancy.Tests.Fakes;
     using Xunit;
-    using ResolveResult = System.Tuple<Nancy.Routing.Route, DynamicDictionary, System.Func<NancyContext, Response>, System.Action<NancyContext>>;
+    using Nancy.Culture;
 
     public class NancyEngineFixture
     {
@@ -22,7 +19,10 @@ namespace Nancy.Tests.Unit
         private readonly NancyContext context;
         private readonly INancyContextFactory contextFactory;
         private readonly Response response;
-        private readonly IErrorHandler errorHandler;
+        private readonly IStatusCodeHandler statusCodeHandler;
+        private readonly IRouteInvoker routeInvoker;
+        private readonly IRequestDispatcher requestDispatcher;
+        private readonly DiagnosticsConfiguration diagnosticsConfiguration;
 
         public NancyEngineFixture()
         {
@@ -30,30 +30,42 @@ namespace Nancy.Tests.Unit
             this.response = new Response();
             this.route = new FakeRoute(response);
             this.context = new NancyContext();
-            this.errorHandler = A.Fake<IErrorHandler>();
+            this.statusCodeHandler = A.Fake<IStatusCodeHandler>();
+            this.requestDispatcher = A.Fake<IRequestDispatcher>();
+            this.diagnosticsConfiguration = new DiagnosticsConfiguration();
 
-            A.CallTo(() => errorHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored)).Returns(false);
+            A.CallTo(() => this.requestDispatcher.Dispatch(A<NancyContext>._)).Invokes(x => this.context.Response = new Response());
+
+            A.CallTo(() => this.statusCodeHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).Returns(false);
 
             contextFactory = A.Fake<INancyContextFactory>();
-            A.CallTo(() => contextFactory.Create()).Returns(context);
+            A.CallTo(() => contextFactory.Create(A<Request>._)).Returns(context);
 
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, null, null));
+            var resolveResult = new ResolveResult { Route = route, Parameters = DynamicDictionary.Empty, Before = null, After = null, OnError = null };
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolveResult);
 
             var applicationPipelines = new Pipelines();
 
+            this.routeInvoker = A.Fake<IRouteInvoker>();
+
+            A.CallTo(() => this.routeInvoker.Invoke(A<Route>._, A<DynamicDictionary>._, A<NancyContext>._)).ReturnsLazily(arg =>
+            {
+                return (Response)((Route)arg.Arguments[0]).Action.Invoke((DynamicDictionary)arg.Arguments[1]);
+            });
+
             this.engine =
-                new NancyEngine(resolver, contextFactory, new[] { this.errorHandler }, A.Fake<IRequestTracing>())
+                new NancyEngine(this.requestDispatcher, this.contextFactory, new[] { this.statusCodeHandler }, A.Fake<IRequestTracing>(), this.diagnosticsConfiguration, new DisabledStaticContentProvider())
                 {
                     RequestPipelinesFactory = ctx => applicationPipelines
                 };
         }
 
         [Fact]
-        public void Should_throw_argumentnullexception_when_created_with_null_resolver()
+        public void Should_throw_argumentnullexception_when_created_with_null_dispatcher()
         {
             // Given, When
             var exception =
-                Record.Exception(() => new NancyEngine(null, A.Fake<INancyContextFactory>(), new[] { this.errorHandler }, A.Fake<IRequestTracing>()));
+                Record.Exception(() => new NancyEngine(null, A.Fake<INancyContextFactory>(), new[] { this.statusCodeHandler }, A.Fake<IRequestTracing>(), this.diagnosticsConfiguration, new DisabledStaticContentProvider()));
 
             // Then
             exception.ShouldBeOfType<ArgumentNullException>();
@@ -64,34 +76,21 @@ namespace Nancy.Tests.Unit
         {
             // Given, When
             var exception =
-                Record.Exception(() => new NancyEngine(A.Fake<IRouteResolver>(), null, new[] { this.errorHandler }, A.Fake<IRequestTracing>()));
+                Record.Exception(() => new NancyEngine(this.requestDispatcher, null, new[] { this.statusCodeHandler }, A.Fake<IRequestTracing>(), this.diagnosticsConfiguration, new DisabledStaticContentProvider()));
 
             // Then
             exception.ShouldBeOfType<ArgumentNullException>();
         }
 
         [Fact]
-        public void Should_throw_argumentnullexception_when_created_with_null_error_handler()
+        public void Should_throw_argumentnullexception_when_created_with_null_status_handler()
         {
             // Given, When
             var exception =
-                Record.Exception(() => new NancyEngine(A.Fake<IRouteResolver>(), A.Fake<INancyContextFactory>(), null, A.Fake<IRequestTracing>()));
+                Record.Exception(() => new NancyEngine(this.requestDispatcher, A.Fake<INancyContextFactory>(), null, A.Fake<IRequestTracing>(), this.diagnosticsConfiguration, new DisabledStaticContentProvider()));
 
             // Then
             exception.ShouldBeOfType<ArgumentNullException>();
-        }
-
-        [Fact]
-        public void Should_invoke_resolved_route()
-        {
-            // Given
-            var request = new Request("GET", "/", "http");
-
-            // When
-            this.engine.HandleRequest(request);
-
-            // Then
-            this.route.ActionWasInvoked.ShouldBeTrue();
         }
 
         [Fact]
@@ -117,7 +116,7 @@ namespace Nancy.Tests.Unit
             this.engine.HandleRequest(request);
 
             // Then
-            A.CallTo(() => this.contextFactory.Create()).MustHaveHappened(Repeated.Exactly.Once);
+            A.CallTo(() => this.contextFactory.Create(request)).MustHaveHappened(Repeated.Exactly.Once);
         }
 
         [Fact]
@@ -125,6 +124,8 @@ namespace Nancy.Tests.Unit
         {
             // Given
             var request = new Request("GET", "/", "http");
+
+            A.CallTo(() => this.requestDispatcher.Dispatch(this.context)).Invokes(x => this.context.Response = this.response);
 
             // When
             var result = this.engine.HandleRequest(request);
@@ -134,8 +135,9 @@ namespace Nancy.Tests.Unit
         }
 
         [Fact]
-        public void Should_add_nancy_version_number_header_on_returned_response()
+        public void Should_not_add_nancy_version_number_header_on_returned_response()
         {
+            // NOTE: Regression for removal of nancy-version from response headers
             // Given
             var request = new Request("GET", "/", "http");
 
@@ -143,49 +145,7 @@ namespace Nancy.Tests.Unit
             var result = this.engine.HandleRequest(request);
 
             // Then
-            result.Response.Headers.ContainsKey("Nancy-Version").ShouldBeTrue();
-        }
-
-        [Fact]
-        public void Should_not_throw_exception_when_setting_nancy_version_header_and_it_already_existed()
-        {
-            // Given
-            var cachedResponse = new Response();
-            cachedResponse.Headers.Add("Nancy-Version", "1.2.3.4");
-            Func<NancyContext, Response> preRequestHook = (ctx) => cachedResponse;
-
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, preRequestHook, null));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            var exception = Record.Exception(() => localEngine.HandleRequest(request));
-
-            // Then
-            exception.ShouldBeNull();
-        }
-
-        [Fact]
-        public void Should_set_nancy_version_number_on_returned_response()
-        {
-            // Given
-            var request = new Request("GET", "/", "http");
-            var nancyVersion = typeof(INancyEngine).Assembly.GetName().Version;
-
-            // When
-            var result = this.engine.HandleRequest(request);
-
-            // Then
-            result.Response.Headers["Nancy-Version"].ShouldEqual(nancyVersion.ToString());
+            result.Response.Headers.ContainsKey("Nancy-Version").ShouldBeFalse();
         }
 
         [Fact]
@@ -232,6 +192,8 @@ namespace Nancy.Tests.Unit
             engine.RequestPipelinesFactory = (ctx) => pipelines;
 
             var request = new Request("GET", "/", "http");
+
+            this.context.Request = request;
 
             // When
             this.engine.HandleRequest(request);
@@ -302,141 +264,6 @@ namespace Nancy.Tests.Unit
         }
 
         [Fact]
-        public void HandleRequest_should_call_route_prereq_then_invoke_route_then_call_route_postreq()
-        {
-            // Given
-            var executionOrder = new List<String>();
-            Func<NancyContext, Response> preHook = (ctx) => { executionOrder.Add("Prehook"); return null; };
-            Action<NancyContext> postHook = (ctx) => executionOrder.Add("Posthook");
-
-            this.route.Action = (d) => { executionOrder.Add("RouteInvoke"); return null; };
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, preHook, postHook));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            localEngine.HandleRequest(request);
-
-            // Then
-            executionOrder.Count().ShouldEqual(3);
-            executionOrder.SequenceEqual(new[] { "Prehook", "RouteInvoke", "Posthook" }).ShouldBeTrue();
-        }
-
-        [Fact]
-        public void HandleRequest_should_not_invoke_route_if_route_prereq_returns_response()
-        {
-            // Given
-            var executionOrder = new List<String>();
-            Func<NancyContext, Response> preHook = (ctx) => { executionOrder.Add("Prehook"); return new Response(); };
-            Action<NancyContext> postHook = (ctx) => executionOrder.Add("Posthook");
-            this.route.Action = (d) => { executionOrder.Add("RouteInvoke"); return null; };
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, preHook, postHook));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new IErrorHandler[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            localEngine.HandleRequest(request);
-
-            // Then
-            executionOrder.Contains("RouteInvoke").ShouldBeFalse();
-        }
-
-        [Fact]
-        public void HandleRequest_should_return_response_from_route_prereq_if_one_returned()
-        {
-            // Given
-            var preResponse = new Response();
-            Func<NancyContext, Response> preHook = (ctx) => preResponse;
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, preHook, null));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new IErrorHandler[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            var result = localEngine.HandleRequest(request);
-
-            // Then
-            result.Response.ShouldBeSameAs(preResponse);
-        }
-
-        [Fact]
-        public void HandleRequest_should_allow_route_postreq_to_change_response()
-        {
-            // Given
-            var postResponse = new Response();
-            Action<NancyContext> postHook = (ctx) => ctx.Response = postResponse;
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, null, postHook));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new IErrorHandler[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            var result = localEngine.HandleRequest(request);
-
-            // Then
-            result.Response.ShouldBeSameAs(postResponse);
-        }
-
-        [Fact]
-        public void HandleRequest_should_allow_route_postreq_to_add_items_to_context()
-        {
-            // Given
-            Action<NancyContext> postHook = (ctx) => ctx.Items.Add("RoutePostReq", new object());
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, null, postHook));
-
-            var pipelines = new Pipelines();
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new IErrorHandler[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            var result = localEngine.HandleRequest(request);
-
-            // Then
-            result.Items.ContainsKey("RoutePostReq").ShouldBeTrue();
-        }
-
-        [Fact]
         public void HandleRequest_prereq_returns_response_should_still_run_postreq()
         {
             // Given
@@ -459,38 +286,7 @@ namespace Nancy.Tests.Unit
         }
 
         [Fact]
-        public void HandleRequest_route_prereq_returns_response_should_still_run_route_postreq_and_postreq()
-        {
-            // Given
-            var executionOrder = new List<String>();
-            Action<NancyContext> postHook = (ctx) => executionOrder.Add("Posthook");
-            Func<NancyContext, Response> routePreHook = (ctx) => { executionOrder.Add("Routeprehook"); return new Response(); };
-            Action<NancyContext> routePostHook = (ctx) => executionOrder.Add("Routeposthook");
-            this.route.Action = (d) => { executionOrder.Add("RouteInvoke"); return null; };
-            var prePostResolver = A.Fake<IRouteResolver>();
-            A.CallTo(() => prePostResolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, DynamicDictionary.Empty, routePreHook, routePostHook));
-
-            var pipelines = new Pipelines();
-            pipelines.AfterRequest.AddItemToStartOfPipeline(postHook);
-
-            var localEngine =
-                new NancyEngine(prePostResolver, contextFactory, new IErrorHandler[] { this.errorHandler }, A.Fake<IRequestTracing>())
-                {
-                    RequestPipelinesFactory = ctx => pipelines
-                };
-
-            var request = new Request("GET", "/", "http");
-
-            // When
-            localEngine.HandleRequest(request);
-
-            // Then
-            executionOrder.Count().ShouldEqual(3);
-            executionOrder.SequenceEqual(new[] { "Routeprehook", "Routeposthook", "Posthook" }).ShouldBeTrue();
-        }
-
-        [Fact]
-        public void Should_ask_error_handler_if_it_can_handle_status_code()
+        public void Should_ask_status_handler_if_it_can_handle_status_code()
         {
             // Given
             var request = new Request("GET", "/", "http");
@@ -499,11 +295,11 @@ namespace Nancy.Tests.Unit
             this.engine.HandleRequest(request);
 
             // Then
-            A.CallTo(() => this.errorHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored)).MustHaveHappened(Repeated.Exactly.Once);
+            A.CallTo(() => this.statusCodeHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).MustHaveHappened(Repeated.Exactly.Once);
         }
 
         [Fact]
-        public void Should_not_invoke_error_handler_if_not_supported_status_code()
+        public void Should_not_invoke_status_handler_if_not_supported_status_code()
         {
             // Given
             var request = new Request("GET", "/", "http");
@@ -512,29 +308,38 @@ namespace Nancy.Tests.Unit
             this.engine.HandleRequest(request);
 
             // Then
-            A.CallTo(() => this.errorHandler.Handle(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).MustNotHaveHappened();
+            A.CallTo(() => this.statusCodeHandler.Handle(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).MustNotHaveHappened();
         }
 
         [Fact]
-        public void Should_invoke_error_handler_if_supported_status_code()
+        public void Should_invoke_status_handler_if_supported_status_code()
         {
             // Given
             var request = new Request("GET", "/", "http");
-            A.CallTo(() => this.errorHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored)).Returns(true);
+            A.CallTo(() => this.statusCodeHandler.HandlesStatusCode(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).Returns(true);
 
             // When
             this.engine.HandleRequest(request);
 
             // Then
-            A.CallTo(() => this.errorHandler.Handle(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).MustHaveHappened(Repeated.Exactly.Once);
+            A.CallTo(() => this.statusCodeHandler.Handle(A<HttpStatusCode>.Ignored, A<NancyContext>.Ignored)).MustHaveHappened(Repeated.Exactly.Once);
         }
 
         [Fact]
         public void Should_set_status_code_to_500_if_route_throws()
         {
             // Given
-            var errorRoute = new Route("GET", "/", null, x => { throw new NotImplementedException(); });
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(errorRoute, DynamicDictionary.Empty, null, null));
+            var resolvedRoute = new ResolveResult(
+                new FakeRoute(),
+                DynamicDictionary.Empty,
+                null,
+                null,
+                null);
+
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
+
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(new NotImplementedException());
+
             var request = new Request("GET", "/", "http");
 
             // When
@@ -545,11 +350,20 @@ namespace Nancy.Tests.Unit
         }
 
         [Fact]
-        public void Should_store_exception_details_if_route_throws()
+        public void Should_store_exception_details_if_dispatcher_throws()
         {
             // Given
-            var errorRoute = new Route("GET", "/", null, x => { throw new NotImplementedException(); });
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(errorRoute, DynamicDictionary.Empty, null, null));
+            var resolvedRoute = new ResolveResult(
+                new FakeRoute(),
+                DynamicDictionary.Empty,
+                null,
+                null,
+                null);
+
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
+
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(new NotImplementedException());
+
             var request = new Request("GET", "/", "http");
 
             // When
@@ -560,30 +374,24 @@ namespace Nancy.Tests.Unit
         }
 
         [Fact]
-        public void Should_set_the_route_parameters_to_the_nancy_context_before_calling_the_module_before()
-        {
-            // Given
-            dynamic parameters = new DynamicDictionary();
-            parameters.Foo = "Bar";
-            Func<NancyContext, Response> moduleBefore = (ctx) => { Assert.Equal(this.context.Parameters, parameters); return null; };
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(route, parameters, moduleBefore, null));
-            var request = new Request("GET", "/", "http");
-
-            // When
-            engine.HandleRequest(request);
-
-            // Then
-            Assert.Equal(this.context.Parameters, parameters);
-        }
-
-        [Fact]
-        public void Should_invoke_the_error_request_hook_if_one_exists_when_route_throws()
+        public void Should_invoke_the_error_request_hook_if_one_exists_when_dispatcher_throws()
         {
             // Given
             var testEx = new Exception();
-            var errorRoute = new Route("GET", "/", null, x => { throw testEx; });
 
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(new ResolveResult(errorRoute, DynamicDictionary.Empty, null, null));
+            var errorRoute =
+                new Route("GET", "/", null, x => { throw testEx; });
+
+            var resolvedRoute = new ResolveResult(
+                errorRoute,
+                DynamicDictionary.Empty,
+                null,
+                null,
+                null);
+
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
+
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(testEx);
 
             Exception handledException = null;
             NancyContext handledContext = null;
@@ -620,9 +428,16 @@ namespace Nancy.Tests.Unit
                 new Route("GET", "/", null, x => { throw new Exception(); });
 
             var resolved =
-                new ResolveResult(routeUnderTest, DynamicDictionary.Empty, null, null);
+                new ResolveResult(routeUnderTest, DynamicDictionary.Empty, null, null, null);
 
             A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolved);
+
+            A.CallTo(() => this.routeInvoker.Invoke(A<Route>._, A<DynamicDictionary>._, A<NancyContext>._)).Invokes((x) =>
+            {
+                routeUnderTest.Action.Invoke(DynamicDictionary.Empty);
+            });
+
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(new Exception());
 
             var pipelines = new Pipelines();
             pipelines.OnError.AddItemToStartOfPipeline((ctx, exception) => null);
@@ -644,13 +459,16 @@ namespace Nancy.Tests.Unit
             // Given
             var expectedException = new Exception();
 
-            var routeUnderTest =
-                new Route("GET", "/", null, x => { throw expectedException; });
+            var resolvedRoute = new ResolveResult(
+               new FakeRoute(),
+               DynamicDictionary.Empty,
+               null,
+               null,
+               null);
 
-            var resolved =
-                new ResolveResult(routeUnderTest, DynamicDictionary.Empty, null, null);
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
 
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolved);
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(expectedException);
 
             var pipelines = new Pipelines();
             pipelines.OnError.AddItemToStartOfPipeline((ctx, exception) => null);
@@ -670,15 +488,18 @@ namespace Nancy.Tests.Unit
         public void Should_add_requestexecutionexception_to_context_when_pipeline_is_null()
         {
             // Given
-            var routeUnderTest =
-                new Route("GET", "/", null, x => { throw new Exception(); });
+            var resolvedRoute = new ResolveResult(
+               new FakeRoute(),
+               DynamicDictionary.Empty,
+               null,
+               null,
+               null);
 
-            var resolved =
-                new ResolveResult(routeUnderTest, DynamicDictionary.Empty, null, null);
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
 
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolved);
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(new Exception());
 
-            var pipelines = new Pipelines {OnError = null};
+            var pipelines = new Pipelines { OnError = null };
             engine.RequestPipelinesFactory = (ctx) => pipelines;
 
             var request = new Request("GET", "/", "http");
@@ -697,13 +518,16 @@ namespace Nancy.Tests.Unit
             // Given
             var expectedException = new Exception();
 
-            var routeUnderTest =
-                new Route("GET", "/", null, x => { throw expectedException; });
+            var resolvedRoute = new ResolveResult(
+                new FakeRoute(),
+                DynamicDictionary.Empty,
+                null,
+                null,
+                null);
 
-            var resolved =
-                new ResolveResult(routeUnderTest, DynamicDictionary.Empty, null, null);
+            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolvedRoute);
 
-            A.CallTo(() => resolver.Resolve(A<NancyContext>.Ignored)).Returns(resolved);
+            A.CallTo(() => this.requestDispatcher.Dispatch(context)).Throws(expectedException);
 
             var pipelines = new Pipelines { OnError = null };
             engine.RequestPipelinesFactory = (ctx) => pipelines;
@@ -716,6 +540,27 @@ namespace Nancy.Tests.Unit
 
             // Then
             returnedException.InnerException.ShouldBeSameAs(expectedException);
+        }
+
+        [Fact]
+        public void Should_return_static_content_response_if_one_returned()
+        {
+            var localResponse = new Response();
+            var staticContent = A.Fake<IStaticContentProvider>();
+            A.CallTo(() => staticContent.GetContent(A<NancyContext>._))
+                        .Returns(localResponse);
+            var localEngine = new NancyEngine(
+                                    this.requestDispatcher,
+                                    this.contextFactory,
+                                    new[] { this.statusCodeHandler },
+                                    A.Fake<IRequestTracing>(),
+                                    this.diagnosticsConfiguration,
+                                    staticContent);
+            var request = new Request("GET", "/", "http");
+
+            var result = localEngine.HandleRequest(request);
+
+            result.Response.ShouldBeSameAs(localResponse);
         }
     }
 }
