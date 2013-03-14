@@ -36,7 +36,14 @@
 
             foreach (var baseUri in baseUriList)
             {
-                listener.Prefixes.Add(baseUri.ToString());
+                var prefix = baseUri.ToString();
+
+                if (!baseUri.Host.Contains("."))
+                {
+                    prefix = prefix.Replace("localhost", "+");
+                }
+
+                listener.Prefixes.Add(prefix);
             }
 
             bootStrapper.Initialise();
